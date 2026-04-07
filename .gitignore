@@ -1,0 +1,21 @@
+# Results and plots
+plots/
+code/results/
+
+# LaTeX
+*.text
+*.tex
+*.aux
+*.bbl
+*.blg
+*.out
+*.pdf
+formatting/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
