@@ -25,6 +25,7 @@ Shared architecture for both optimal stopping and ski rental.
         attends causally within sub-chain t only
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -356,8 +357,8 @@ class OnlineDecisionTransformer(nn.Module):
         """Compute additive context embeddings (horizon, buy cost, rent cost, task)."""
         parts = []
         if n_horizon is not None:
-            if isinstance(n_horizon, int):
-                n_t = torch.full((batch_size, 1), n_horizon, dtype=torch.long, device=device)
+            if isinstance(n_horizon, (int, np.integer)):
+                n_t = torch.full((batch_size, 1), int(n_horizon), dtype=torch.long, device=device)
             else:
                 n_t = n_horizon.to(device).unsqueeze(1)
             parts.append(self.horizon_embed(n_t))

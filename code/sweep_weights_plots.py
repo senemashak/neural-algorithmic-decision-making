@@ -90,11 +90,20 @@ def plot_training_curves(entries, problem, out_dir):
     for entry in entries:
         config = entry["config"]
         all_curves = [s["training_curve"] for s in entry["seeds"]]
-        n_epochs = len(all_curves[0])
+        n_epochs = max(len(c) for c in all_curves)
         epochs = list(range(1, n_epochs + 1))
 
         def _extract(key):
-            arr = np.array([[ep.get(key, 0) for ep in curve] for curve in all_curves])
+            # Seeds may have different epoch counts due to early stopping
+            # Pad shorter seeds with their last value
+            max_len = max(len(c) for c in all_curves)
+            rows = []
+            for curve in all_curves:
+                vals = [ep.get(key, 0) for ep in curve]
+                if len(vals) < max_len:
+                    vals.extend([vals[-1]] * (max_len - len(vals)))
+                rows.append(vals)
+            arr = np.array(rows)
             return arr.mean(axis=0), arr.std(axis=0)
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -115,14 +124,14 @@ def plot_training_curves(entries, problem, out_dir):
 
         # Right: component breakdown
         comp_key = "train_C" if problem == "stopping" else "train_J"
-        for key, label, color in [(comp_key, "L_value", LOSS_COLORS["L_value"]),
-                                   ("train_a", "L_action", LOSS_COLORS["L_action"]),
-                                   ("train_chain", "L_chain", LOSS_COLORS["L_chain"])]:
+        for key, label, color in [(comp_key, "L value", LOSS_COLORS["L_value"]),
+                                   ("train_a", "L action", LOSS_COLORS["L_action"]),
+                                   ("train_chain", "L chain", LOSS_COLORS["L_chain"])]:
             if key in all_curves[0][0]:
                 m, s = _extract(key)
-                if np.any(m > 0):  # skip if all zeros
-                    ax2.plot(epochs, m, label=label, color=color)
-                    ax2.fill_between(epochs, m - s, m + s, alpha=0.15, color=color)
+                # Always plot all 3 components (show as flat zero if inactive)
+                ax2.plot(epochs, m, label=label, color=color)
+                ax2.fill_between(epochs, m - s, m + s, alpha=0.15, color=color)
         ax2.set_xlabel("Epoch")
         ax2.set_ylabel("Component Loss")
         ax2.set_title("Loss Decomposition")

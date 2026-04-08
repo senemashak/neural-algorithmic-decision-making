@@ -187,54 +187,44 @@ def compute_loss(
     metrics = {}
     total = torch.tensor(0.0, device=device)
 
-    # ── L_value: MSE on V(t) vs target_V(t) ─────────────────────────────────
-    #     Only at decision positions the robust wrapper actually uses.
+    # ── Always compute all 3 losses for logging, only backprop weighted ones ──
+
+    # L_value: MSE on V(t) vs target_V(t)
+    T_dec = decision_pos.shape[0]
+    V_final = chain2d_V[:, decision_pos]
+    V_tgt_dec = V_target[:, :T_dec]
+    dec_mask = dec_level_mask[:, :T_dec]
+    mse_v = ((V_final - V_tgt_dec) ** 2 * dec_mask).sum() \
+            / dec_mask.sum().clamp(min=1)
     if w_value > 0:
-        T_dec = decision_pos.shape[0]
-        V_final = chain2d_V[:, decision_pos]
-        V_tgt_dec = V_target[:, :T_dec]
-        dec_mask = dec_level_mask[:, :T_dec]
-        mse_v = ((V_final - V_tgt_dec) ** 2 * dec_mask).sum() \
-                / dec_mask.sum().clamp(min=1)
         total = total + w_value * mse_v
-        metrics["value_loss"] = mse_v.item()
+    metrics["value_loss"] = mse_v.item()
 
-    # ── L_chain: MSE on all chain_V(t,k) vs target_V(k) ────────────────────
-    #     Uses full padding mask (NOT robust mask). Sub-chains for useful
-    #     decision steps need all their intermediate V(t,k) supervised,
-    #     even when k falls outside the robust wrapper's useful range.
+    # L_chain: MSE on all chain_V(t,k) vs target_V(k)
+    chain2d_tgt = _build_chain2d_targets(V_target, j_idx, T)
+    valid = _build_chain2d_valid_mask(t_idx, j_idx, mask_f, T)
+    mse_c = ((chain2d_V - chain2d_tgt) ** 2 * valid).sum() \
+            / valid.sum().clamp(min=1)
     if w_chain > 0:
-        chain2d_tgt = _build_chain2d_targets(V_target, j_idx, T)
-        valid = _build_chain2d_valid_mask(t_idx, j_idx, mask_f, T)
-        mse_c = ((chain2d_V - chain2d_tgt) ** 2 * valid).sum() \
-                / valid.sum().clamp(min=1)
         total = total + w_chain * mse_c
-        metrics["chain_loss"] = mse_c.item()
+    metrics["chain_loss"] = mse_c.item()
 
-    # ── L_action: soft CE on V(t) > x_t  →  stop/buy ───────────────────────
-    #     Only at decision positions the robust wrapper actually uses.
+    # L_action: soft CE on implied decision
+    a_tgt = a_target[:, :T_dec]
+    act_mask = dec_level_mask[:, :T_dec]
+    if problem == "stopping":
+        x_norm = batch["values"].to(device)[:, :T_dec].float() / M
+        margin = alpha * (x_norm - V_final)
+    else:
+        margin = alpha * (V_final - 1.0)
+    a_soft = torch.sigmoid(margin)
+    eps = 1e-7
+    ce = -(a_tgt * torch.log(a_soft + eps)
+           + (1 - a_tgt) * torch.log(1 - a_soft + eps))
+    a_loss = (ce * act_mask).sum() / act_mask.sum().clamp(min=1)
     if w_action > 0:
-        T_dec = decision_pos.shape[0]
-        V_final = chain2d_V[:, decision_pos]
-        a_tgt = a_target[:, :T_dec]
-        act_mask = dec_level_mask[:, :T_dec]
-
-        if problem == "stopping":
-            # stop if x_t/M >= V(t)  (i.e., x_t >= C_hat)
-            # a_target=1 when x_t >= C_t, so a_soft should be high when x > V
-            x_norm = batch["values"].to(device)[:, :T_dec].float() / M
-            margin = alpha * (x_norm - V_final)
-        else:
-            # buy if V(t) >= 1.0  (J[t]/B >= 1 means J[t] >= B)
-            margin = alpha * (V_final - 1.0)
-
-        a_soft = torch.sigmoid(margin)
-        eps = 1e-7
-        ce = -(a_tgt * torch.log(a_soft + eps)
-               + (1 - a_tgt) * torch.log(1 - a_soft + eps))
-        a_loss = (ce * act_mask).sum() / act_mask.sum().clamp(min=1)
         total = total + w_action * a_loss
-        metrics["action_loss"] = a_loss.item()
+    metrics["action_loss"] = a_loss.item()
 
     return total, metrics
 
