@@ -143,8 +143,8 @@ Guarantee: $\mathrm{CR} \ge \beta$ regardless of $V(t)$ quality. The transformer
 \begin{enumerate}
 \item \textbf{Loss weight sweep} (\texttt{exp1}): 11 configs for $(w_v, w_a, w_c)$.
 \item \textbf{Robust-aware training} (\texttt{exp2}): masked vs standard at 7 $\beta$ values.
-\item \textbf{Attention analysis} (\texttt{exp3}): mechanistic interpretation.
-\item \textbf{Horizon generalization} (\texttt{exp4}): $n \in \{5, \ldots, 100\}$ (trained on $[20, 50]$).
+\item \textbf{Horizon generalization} (\texttt{exp3}): $n \in \{5, \ldots, 100\}$ (trained on $[20, 50]$).
+\item \textbf{Attention analysis} (\texttt{exp4}): mechanistic interpretation.
 \end{enumerate}
 
 \subsection{Experiment 1: Loss weighting}
@@ -229,40 +229,49 @@ For $\beta \in \{0.05, \ldots, 0.35\}$: masked model (1/3, 1/3, 1/3) vs standard
 \caption{Exp~2: Training curves for $\beta=0.05$ (left, minimal masking) and $\beta=0.35$ (right, heavy masking).}
 \end{figure}
 
-\subsection{Experiment 3: Attention analysis}
-
-Attention from the best model (value+action) on 5 diverse instances (geometric, Zipf, binomial, log-normal, bimodal).
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L0_H0_inst0.png}
-\hfill
-\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L1_H0_inst0.png}
-\caption{Exp~3: Full attention maps, geometric instance. Layer~0 (left): chain$\to$chain diagonal. Layer~1 (right): chain$\to$obs diffuse.}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/head_specialization_inst0.png}
-\hfill
-\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/predictions_inst0.png}
-\caption{Exp~3: Head specialization showing obs vs chain attention fraction (left). Prediction accuracy: $V(t)$ vs DP target $C_t/M$ (right).}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/subchain_t5_L0_inst0.png}
-\hfill
-\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/decision_obs_L1_inst0.png}
-\caption{Exp~3: Sub-chain $t{=}5$ internal attention in Layer~0 (left). Decision step observation profiles in Layer~1 (right).}
-\end{figure}
-
-\subsection{Experiment 4: Horizon generalization}
+\subsection{Experiment 3: Horizon generalization}
 
 Evaluate at $n \in \{5, 10, 15, 20, 30, 40, 50, 55, 65, 75, 85, 100\}$ (trained on $[20, 50]$). No retraining.
 
 \begin{figure}[h]
 \centering
 \includegraphics[width=0.85\linewidth]{plots/exp4_horizon/horizon_cr_all_betas.png}
-\caption{Exp~4: CR vs test horizon for equal third model at all robustness levels. DP oracle (red), no wrapper (blue), wrapper at each $\beta$ (colored lines). Training range shaded.}
+\caption{Exp~3: CR vs test horizon for equal third model at all robustness levels. DP oracle (red), no wrapper (blue), wrapper at each $\beta$ (colored lines). Training range shaded.}
+\end{figure}
+
+\subsection{Experiment 4: Attention analysis}
+
+We extract attention weights from the best model (value+action) via teacher-forced forward passes on 5 diverse instances (one per family: geometric, Zipf, binomial, log-normal, bimodal). The 2-layer, 2-head architecture was chosen to match the Proposition~1 construction. We ask: do the learned attention patterns reflect the theoretical roles?
+
+The full attention matrix divides into four quadrants (Figure~\ref{fig:attn-full}). The chain$\to$chain quadrant (bottom-right) in Layer~0 shows a strong nearest-neighbor diagonal: each $V(t,k)$ attends primarily to $V(t,k{+}1)$, consistent with the backward-induction recurrence $C_k = f(C_{k+1})$. Layer~1's chain$\to$observation quadrant (bottom-left) shows diffuse attention across visible observations, consistent with PMF estimation from i.i.d.\ samples.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L0_H0_inst0.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L1_H0_inst0.png}
+\caption{Full attention maps (geometric family, $n=20$). Layer~0 (left): chain$\to$chain diagonal (DP recurrence). Layer~1 (right): chain$\to$obs diffuse (distribution inference).}
+\label{fig:attn-full}
+\end{figure}
+
+The head specialization plot (Figure~\ref{fig:attn-head}) confirms layer-level specialization: Layer~0 heads attend almost entirely to chain tokens (green), while Layer~1 Head~0 increasingly reads observations (blue) at later decision steps where the posterior is more informative. This matches the Proposition~1 construction where Layer~1 (FFN) computes ReLU terms from the previous chain value and Layer~2 (attention) computes the PMF-weighted sum.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/head_specialization_inst0.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/predictions_inst0.png}
+\caption{Head specialization (left) and prediction accuracy (right). Geometric family, $n=20$.}
+\label{fig:attn-head}
+\end{figure}
+
+The sub-chain internal attention (Figure~\ref{fig:attn-sub}) zooms into one sub-chain's within-chain pattern: Head~0 shows strong nearest-neighbor attention (each step reads the previous), while Head~1 attends more broadly. The observation profiles show that at later decision steps (more observations), attention distributes more uniformly---as expected for estimating a PMF from a growing sample.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/subchain_t5_L0_inst0.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/decision_obs_L1_inst0.png}
+\caption{Sub-chain $t{=}5$ internal attention in Layer~0 (left). Decision step observation profiles in Layer~1 (right). Geometric family, $n=20$.}
+\label{fig:attn-sub}
 \end{figure}
