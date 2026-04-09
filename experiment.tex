@@ -220,6 +220,15 @@ All losses are masked by the padding mask. When robust-aware training is used, $
 \section{Experiments}
 \label{sec:experiments}
 
+We conduct four experiments for optimal stopping:
+
+\begin{enumerate}
+\item \textbf{Loss weight sweep} (\texttt{exp1\_loss\_weights}): Which combination of $L_{\mathrm{value}}$, $L_{\mathrm{action}}$, $L_{\mathrm{chain}}$ works best? 11 weight configurations, 3 seeds each.
+\item \textbf{Robust-aware training} (\texttt{exp2\_robust}): Does masking training to only the positions the robust wrapper uses improve performance? 7 robustness levels, standard vs masked.
+\item \textbf{Attention analysis} (\texttt{exp3\_attention}): What do the attention heads learn? Mechanistic interpretation of the best models from Experiments~1--2.
+\item \textbf{Horizon generalization} (\texttt{exp4\_horizon}): Does the model generalize to horizons outside the training range $[20, 50]$? Evaluation at $n \in \{5, 10, 15, 20, 30, 40, 50, 75, 100\}$.
+\end{enumerate}
+
 \subsection{Experimental setting}
 
 The architecture satisfies both Propositions~\ref{prop:cot-stopping}--\ref{prop:cot-ski}: $d_{\mathrm{model}} = 1002 \ge M + 2$ (exact stopping DP) and $d_{\mathrm{ff}} = 2259 \ge (B_{\max}{+}1)\sqrt{n_{\max}}/(2\sqrt{\varepsilon})$ (ski DP to $\varepsilon = 0.1$). We use 2 layers (the theoretical minimum: the stopping Bellman backup requires FFN then attention sequentially) and 2 attention heads, yielding ${\sim}20$M parameters.
@@ -288,3 +297,44 @@ Per config: training curves (total + breakdown, $\pm$std across seeds), in-distr
 
 \paragraph{Compute.}
 66 models total ($11 \times 3 \times 2$). At ${\sim}60$s/epoch on an RTX A6000, the sweep completes in ${\sim}12$ hours on two GPUs in parallel (stopping on one, ski on the other).
+
+\subsection{Experiment 2: Robust-aware training}
+\label{sec:exp2}
+
+\paragraph{Motivation.}
+The robust deployment rule (Algorithm~1) ignores the model's predictions at early and late positions. Training on those positions wastes gradient signal. Does restricting supervision to only the positions the wrapper uses improve the model's accuracy where it matters?
+
+\paragraph{Design.}
+For each $\beta \in \{0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35\}$, we train a masked model with equal weights $(1/3, 1/3, 1/3)$ where $L_{\mathrm{value}}$, $L_{\mathrm{action}}$, and $L_{\mathrm{chain}}$ are zeroed at positions outside the middle phase $(\lambda_1, \lambda_2]$. For $L_{\mathrm{chain}}$, the mask filters by decision step $t$: entire sub-chains for non-useful $t$ receive no gradient, but useful sub-chains are supervised end-to-end. We compare against the standard \texttt{equal\_third} model (trained on all positions) deployed with the same wrapper at each $\beta$.
+
+\paragraph{Key questions.}
+\begin{enumerate}
+    \item Does masked training improve CR under the robust wrapper?
+    \item Does the answer depend on $\beta$ (how much of the horizon is masked)?
+    \item How does the wrapper itself affect CR compared to no wrapper ($\beta = 0$)?
+\end{enumerate}
+
+\subsection{Experiment 3: Attention analysis}
+\label{sec:exp3}
+
+\paragraph{Motivation.}
+The 2-layer, 2-head architecture was chosen to match the Proposition~1 construction. Do the learned attention patterns reflect the theoretical roles: one head for chain recurrence (reading $V(t,k{+}1)$), one for observation reading (inferring the PMF)?
+
+\paragraph{Design.}
+For the best models from Experiments~1--2, we extract attention weights via teacher-forced forward passes on 5 diverse instances (one per family: geometric, Zipf, binomial, log-normal, bimodal). Visualizations include: full attention maps with quadrant labels, per-decision-step observation profiles, within-sub-chain recurrence patterns, head specialization (obs vs chain attention fraction), and prediction accuracy ($V(t)$ vs DP targets).
+
+\subsection{Experiment 4: Horizon generalization}
+\label{sec:exp4}
+
+\paragraph{Motivation.}
+The model trains on $n \sim \mathrm{U}[20, 50]$. Can it generalize to shorter ($n = 5, 10, 15$) or longer ($n = 75, 100$) horizons? The chain-of-thought provides $n{-}1$ reasoning steps regardless of horizon, so in principle the same 2-layer computation applies at any $n$.
+
+\paragraph{Design.}
+We evaluate the best models from Experiments~1--2 at $n \in \{5, 10, 15, 20, 30, 40, 50, 75, 100\}$. No retraining. For each horizon: DP oracle (upper bound), \texttt{value+action} (no wrapper), \texttt{equal\_third} with wrapper at each $\beta$, and masked models with wrapper at their training $\beta$. Instance count scales inversely with $n^2$ to manage GPU memory (the $O(n^2)$ chain creates up to 5{,}050 tokens at $n{=}100$).
+
+\paragraph{Key questions.}
+\begin{enumerate}
+    \item Does CR degrade at extrapolation horizons?
+    \item Does the robust wrapper help more outside the training range?
+    \item Does masked training help or hurt at novel horizons?
+\end{enumerate}
