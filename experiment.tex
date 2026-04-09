@@ -1,35 +1,124 @@
+% Requires: \usepackage{multirow}, \usepackage{booktabs}, \usepackage{algorithm}, \usepackage{algorithmic}
+
+\section{Problem Setting}
+\label{sec:problem}
+
+An agent observes a sequence of values $x_1, \ldots, x_n$ drawn i.i.d.\ from an unknown distribution $F$ over $\{1, \ldots, M\}$. At each step $t$, the agent sees $x_t$ and must irrevocably decide whether to \emph{stop} (collecting reward $x_t$) or \emph{continue}. The goal is to maximise the expected reward, i.e.\ to stop at the value as close as possible to $\max_s x_s$.
+
+\paragraph{Optimal policy when $F$ is known.}
+If the agent knows $F$, the optimal online policy follows from backward induction. Define \emph{continuation values}:
+\begin{align}
+C_n &= 0, & C_t &= \mathbb{E}_{X \sim F}\!\big[\max(X,\, C_{t+1})\big], \quad t = n{-}1, \ldots, 1. \label{eq:dp-intro}
+\end{align}
+$C_t$ is the expected reward obtainable from step $t$ onward under the optimal policy. Each step of the recurrence~\eqref{eq:dp-intro} is called a \emph{Bellman backup}: it computes $C_t$ from $C_{t+1}$ by taking the expectation of $\max(X, C_{t+1})$ over $F$. The optimal rule is: \emph{stop at step $t$ if $x_t \ge C_t$} (the current value exceeds the expected future). This is the \emph{prophet inequality} threshold policy. Since the Bellman backup computes $C_t$ from $C_{t+1}$, the DP runs backward, but the policy is applied forward online.
+
+\paragraph{Challenge.}
+In practice the agent does not know $F$. It must infer the distribution from the observations $x_1, \ldots, x_t$ seen so far and simultaneously compute (approximate) continuation values---a Bayesian online decision problem. We train a transformer to perform both tasks jointly via a chain-of-thought scratchpad.
+
 \section{Model and Training}
 \label{sec:model}
 
 \subsection{Model architecture}
 
-The optimal stopping DP runs backward ($C_t$ depends on $C_{t+1}$), but the agent processes observations forward. A transformer with $L$ layers compresses at most $L$ backward steps per pass. Our solution: a \emph{chain-of-thought scratchpad} that explicitly unrolls the DP, one step per token. A 2-layer transformer can then execute arbitrarily long backward inductions.
+The DP~\eqref{eq:dp-intro} runs backward ($C_t$ depends on $C_{t+1}$), but the agent processes observations forward. A transformer with $L$ layers compresses at most $L$ backward steps per pass. Our solution: a \emph{chain-of-thought scratchpad} that explicitly unrolls the DP, one step per token. A 2-layer transformer can then execute arbitrarily long backward inductions.
 
-At each decision step $t$, a sub-chain computes $V(t, n{-}2) \to \cdots \to V(t, t)$, producing decision output $V(t) := V(t,t) \approx C_t/M$. Each sub-chain conditions on observations $x_0, \ldots, x_t$ only. Total chain length: $n(n{-}1)/2$.
+At each decision step $t \in \{0, \ldots, n{-}2\}$, a sub-chain runs backward induction from the end of the horizon down to step $t$:
+\[
+  V(t, n{-}2) \;\to\; V(t, n{-}3) \;\to\; \cdots \;\to\; V(t, t),
+\]
+where $V(t,k)$ is the model's estimate of $C_k/M$ (the normalised continuation value at DP step $k$) conditioned on observations $x_0, \ldots, x_t$ only. The decision output is the final token of each sub-chain: $V(t) := V(t,t) \approx C_t/M$. Sub-chain $t$ has length $n{-}1{-}t$, giving a total chain length of $\sum_{t=0}^{n-2}(n{-}1{-}t) = n(n{-}1)/2$.
 
 \begin{figure}[h]
 \centering
-\fbox{\begin{minipage}{0.9\textwidth}
-\textbf{Sequence layout} ($n = 5$, 15 tokens):
-\begin{center}
-\small
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
 \begin{tabular}{|c|c|c|c|c||c|c|c|c||c|c|c||c|c||c|}
 \hline
-$x_0$ & $x_1$ & $x_2$ & $x_3$ & $x_4$ & $V_{0,3}$ & $V_{0,2}$ & $V_{0,1}$ & $V_{0,0}$ & $V_{1,3}$ & $V_{1,2}$ & $V_{1,1}$ & $V_{2,3}$ & $V_{2,2}$ & $V_{3,3}$ \\
+$x_0$ & $x_1$ & $x_2$ & $x_3$ & $x_4$ &
+$V_{0,3}$ & $V_{0,2}$ & $V_{0,1}$ & $\mathbf{V_{0,0}}$ &
+$V_{1,3}$ & $V_{1,2}$ & $\mathbf{V_{1,1}}$ &
+$V_{2,3}$ & $\mathbf{V_{2,2}}$ &
+$\mathbf{V_{3,3}}$ \\
 \hline
-\multicolumn{5}{|c||}{observations} & \multicolumn{4}{c||}{sub(0)} & \multicolumn{3}{c||}{sub(1)} & \multicolumn{2}{c||}{sub(2)} & sub(3) \\
+\multicolumn{5}{|c||}{observations} & \multicolumn{4}{c||}{chain($t{=}0$)} & \multicolumn{3}{c||}{chain($t{=}1$)} & \multicolumn{2}{c||}{chain($t{=}2$)} & chain($t{=}3$) \\
 \hline
 \end{tabular}
-\end{center}
-Decision outputs (diagonal): $V_{0,0}, V_{1,1}, V_{2,2}, V_{3,3}$. Stop at first $t$ where $x_t \ge V(t) \cdot M$.
-\end{minipage}}
-\caption{2D chain-of-thought sequence layout.}
+\caption{Sequence layout ($n = 5$, 15 tokens). $V_{t,k} \approx C_k/M$; within each chain the second index $k$ counts \emph{down} from $n{-}2$ to $t$ (backward induction). Bold = decision outputs $V(t) := V_{t,t}$. Stop at first $t$ where $x_t \ge V(t) \cdot M$.}
 \label{fig:layout}
 \end{figure}
 
-\textbf{Architecture:} 2 layers (minimum for Bellman backup: FFN computes ReLU terms, attention computes PMF-weighted sum), 2 heads, $d_{\mathrm{model}} = 1002 \ge M{+}2$, $d_{\mathrm{ff}} = 2259$, ${\sim}20$M parameters. Single output head maps chain tokens to scalars.
+\paragraph{Input representation.}
+The model processes a sequence of $L = n + n(n{-}1)/2$ tokens. Each token is represented as a $d_{\mathrm{model}}$-dimensional vector, constructed by summing several learned embeddings:
 
-\textbf{Training:} teacher forcing (ground-truth DP values as chain inputs). \textbf{Inference:} autoregressive (model feeds its own predictions).
+\emph{Observation tokens} ($x_0, \ldots, x_{n-1}$): each observation $x_t \in \{0, \ldots, M\}$ is embedded as
+\[
+  h_t^{\mathrm{obs}} = \mathrm{ValueEmbed}(x_t) + \mathrm{PosEmbed}(t) + h^{\mathrm{ctx}},
+\]
+where $\mathrm{ValueEmbed}$ is a learned embedding table of size $(M{+}1) \times d_{\mathrm{model}}$, $\mathrm{PosEmbed}$ encodes the time step, and $h^{\mathrm{ctx}}$ is a shared additive context vector encoding the horizon $n$ via a learned embedding table. $M$ is a fixed architecture constant (not a runtime input): it determines the embedding table size and the normalisation $C_t / M$.
+
+\emph{Chain tokens} ($V(t,k)$): at each chain position, the input is the prediction from the previous position in the same sub-chain, projected from a scalar to $d_{\mathrm{model}}$:
+\[
+  h^{\mathrm{chain}}_{t,k} = \mathrm{Linear}\bigl(V(t, k{+}1)\bigr) + \mathrm{ChainT}(t) + \mathrm{ChainJ}(j) + h^{\mathrm{ctx}},
+\]
+where $j$ is the within-sub-chain index ($j = n{-}2{-}k$), $\mathrm{ChainT}$ and $\mathrm{ChainJ}$ are separate learned positional embeddings for the decision step and the DP step respectively. The first token of each sub-chain ($j=0$, predicting $V(t, n{-}2)$) receives a learned start vector instead of a projected prediction. During teacher forcing, $V(t, k{+}1)$ is the ground-truth $C_{k+1}/M$; during autoregressive inference, it is the model's own output from the previous chain position.
+
+\paragraph{Architecture.}
+The transformer backbone consists of $L_{\mathrm{layers}} = 2$ pre-norm encoder layers with $H = 2$ attention heads, ReLU activation, and dropout $0.1$. Dimension sizes are set to satisfy the theoretical construction requirements (Proposition~\ref{prop:cot-stopping}):
+\begin{itemize}
+    \item $d_{\mathrm{model}} = 1002 \ge M + 2$ (with $M = 1000$), rounded up to a multiple of $H$, so that each head can represent the full value domain.
+    \item $d_{\mathrm{ff}} = 2259 \ge M$, ensuring at least $M$ hidden units for the ReLU construction in Proposition~\ref{prop:cot-stopping}.
+    \item Total parameters: ${\sim}20$M.
+\end{itemize}
+In the Proposition~\ref{prop:cot-stopping} construction, a single layer suffices for the known-$F$ Bellman backup: $W_1$ and $\mathbf{b}_1$ compute the ReLU terms $\operatorname{ReLU}(j - C_{k+1})$, while $W_2$ encodes the PMF weights $f_j$ to produce the weighted sum via the residual connection. The second layer is available for the Bayesian setting, where the model must infer $F$ from observations at runtime (see Remark after Proposition~\ref{prop:cot-stopping}). A final layer norm followed by a linear head maps each chain token's $d_{\mathrm{model}}$-dimensional representation to a scalar output $\hat{V}(t,k) \in \mathbb{R}$.
+
+\paragraph{Training and inference.}
+During \emph{teacher forcing} (training), chain inputs are the shifted ground-truth DP values: position $V(t,k)$ receives $C_{k+1}/M$ as input. This allows a single forward pass over the full sequence. During \emph{autoregressive} inference, the model generates chain tokens left-to-right within each sub-chain, feeding its own prediction $\hat{V}(t, k{+}1)$ as input to the next position. This is the deployment regime and may suffer from error accumulation.
+
+\begin{table}[h]
+\centering
+\caption{Model and training hyperparameters.}
+\label{tab:hyperparams}
+\small
+\begin{tabular}{lll}
+\hline
+\textbf{Category} & \textbf{Parameter} & \textbf{Value} \\
+\hline
+\multirow{5}{*}{Architecture}
+  & Layers ($L_{\mathrm{layers}}$) & 2 \\
+  & Attention heads ($H$) & 2 \\
+  & Model dimension ($d_{\mathrm{model}}$) & 1002 \\
+  & FFN dimension ($d_{\mathrm{ff}}$) & 2259 \\
+  & Dropout & 0.1 \\
+\hline
+\multirow{2}{*}{Embeddings}
+  & Value domain ($M$) & 1000 \\
+  & Max horizon ($n_{\mathrm{max\_embed}}$) & 501 \\
+\hline
+\multirow{7}{*}{Optimisation}
+  & Optimiser & AdamW \\
+  & Learning rate & $10^{-3}$ \\
+  & Weight decay & $10^{-4}$ \\
+  & LR schedule & Cosine annealing to $10^{-5}$ \\
+  & Epochs & 30 \\
+  & Batch size & 64 \\
+  & Early stopping patience & 10 epochs \\
+\hline
+\multirow{3}{*}{Data}
+  & Training instances & 5000 \\
+  & Validation instances & 500 \\
+  & Training horizon range & $n \sim U[20, 50]$ \\
+\hline
+\multirow{2}{*}{Loss}
+  & Action temperature ($\alpha$) & 10 \\
+  & Model selection criterion & Best validation loss \\
+\hline
+\multirow{3}{*}{Evaluation}
+  & Eval instances per seed & 1000 \\
+  & Eval seeds & 5 \\
+  & Training seeds per config & 3 \\
+\hline
+\end{tabular}
+\end{table}
 
 \subsection{Attention masking}
 
@@ -72,11 +161,7 @@ $V_{2,2}$ & \checkmark & \checkmark & \checkmark & & & & & & & \checkmark \\
 
 Each instance: random family (10 training families), random hyperparameters, support-subsampled PMF (6 of 10 families), horizon $n \sim \mathrm{U}[20, 50]$, then $n$ i.i.d.\ draws $x_1, \ldots, x_n \sim F$ over $\{1, \ldots, M\}$. Same procedure for train and test. An 11th family (\texttt{hard\_instance}) is OOD-only.
 
-Labels via exact backward induction on the known $F$ (transformer never sees $F$):
-\begin{align}
-C_n = 0, \qquad C_t = \mathbb{E}_{X \sim F}\!\big[\max(X, C_{t+1})\big], \quad t = n{-}1, \ldots, 1. \label{eq:dp}
-\end{align}
-Stop at $t$ if $x_t \ge C_t$. Model predicts $C_t/M \in [0,1]$.
+Labels are the continuation values $C_t$ from~\eqref{eq:dp-intro}, computed via exact backward induction on the known $F$ (the transformer never sees $F$). The model predicts $C_t/M \in [0,1]$.
 
 \subsection{Training loss}
 
@@ -111,7 +196,12 @@ $L_{\mathrm{chain}}$ filters by decision step $t$, not DP step $k$: useful sub-c
 
 \subsection{Evaluation metric}
 
-Competitive ratio: $\mathrm{CR} = \mathbb{E}[X_\tau] / \mathbb{E}[\max_s X_s]$. The DP oracle (knows $F$) achieves ${\approx}0.94$; the gap from 1 is the cost of being online. All policies evaluated on the same instances. Mean $\pm$ std over 5 eval seeds, 1{,}000 instances each.
+We evaluate policies using the \emph{competitive ratio} (CR), computed as the ratio of means over a test set of $N$ i.i.d.\ instances:
+\[
+  \mathrm{CR} \;=\; \frac{\frac{1}{N}\sum_{i=1}^{N} X^{(i)}_{\tau_i}}{\frac{1}{N}\sum_{i=1}^{N} \max_{0 \le s < n} X^{(i)}_s}
+  \;=\; \frac{\text{mean policy reward}}{\text{mean realised maximum}}.
+\]
+A CR of 1 means the policy always selects the global maximum; the DP oracle (which knows $F$) achieves $\mathrm{CR} \approx 0.94$ on our test families---the gap from 1 reflects the inherent cost of the online constraint, not model error. We take the ratio of means (not the mean of per-instance ratios) to avoid instability from instances where the denominator is near zero. All policies are evaluated on the \emph{same} instances for fair comparison. We report mean $\pm$ std over 5 eval seeds with 1{,}000 instances each.
 
 \subsection{Robust deployment rule}
 
@@ -147,7 +237,7 @@ Guarantee: $\mathrm{CR} \ge \beta$ regardless of $V(t)$ quality. The transformer
 \item \textbf{Attention analysis} (\texttt{exp4}): mechanistic interpretation.
 \end{enumerate}
 
-\subsection{Experiment 1: Loss weighting}
+\paragraph{Experiment 1: Loss weighting.}
 
 \begin{center}
 \small
@@ -199,8 +289,7 @@ action+chain & 0 & .5 & .5 & & & & \\
 \caption{Exp~1: Action only (left) fails to learn meaningful values. Equal third (right) converges but underperforms value+action.}
 \end{figure}
 
-\subsection{Experiment 2: Robust-aware training}
-
+\paragraph{Experiment 2: Robust-aware training.}
 For $\beta \in \{0.05, \ldots, 0.35\}$: masked model (1/3, 1/3, 1/3) vs standard model, both deployed with wrapper.
 
 \begin{figure}[h]
@@ -229,8 +318,7 @@ For $\beta \in \{0.05, \ldots, 0.35\}$: masked model (1/3, 1/3, 1/3) vs standard
 \caption{Exp~2: Training curves for $\beta=0.05$ (left, minimal masking) and $\beta=0.35$ (right, heavy masking).}
 \end{figure}
 
-\subsection{Experiment 3: Horizon generalization}
-
+\paragraph{Experiment 3: Horizon generalization.}
 Evaluate at $n \in \{5, 10, 15, 20, 30, 40, 50, 55, 65, 75, 85, 100\}$ (trained on $[20, 50]$). No retraining.
 
 \begin{figure}[h]
@@ -239,22 +327,25 @@ Evaluate at $n \in \{5, 10, 15, 20, 30, 40, 50, 55, 65, 75, 85, 100\}$ (trained 
 \caption{Exp~3: CR vs test horizon for equal third model at all robustness levels. DP oracle (red), no wrapper (blue), wrapper at each $\beta$ (colored lines). Training range shaded.}
 \end{figure}
 
+\clearpage
+
 \subsection{Experiment 4: Attention analysis}
 
-We extract attention weights from the best model (value+action) via teacher-forced forward passes on 5 diverse instances (one per family: geometric, Zipf, binomial, log-normal, bimodal). The 2-layer, 2-head architecture was chosen to match the Proposition~1 construction. We ask: do the learned attention patterns reflect the theoretical roles?
+The Proposition~\ref{prop:cot-stopping} construction sets all attention to zero---the FFN alone performs the Bellman backup with $f_j$ hardcoded in the weights. The trained model, however, must handle arbitrary PMFs with a single set of weights, so it \emph{must} use attention to read distributional information from the observations. We ask: what attention patterns did the model actually learn, and are they functionally interpretable?
 
-The full attention matrix divides into four quadrants (Figure~\ref{fig:attn-full}). The chain$\to$chain quadrant (bottom-right) in Layer~0 shows a strong nearest-neighbor diagonal: each $V(t,k)$ attends primarily to $V(t,k{+}1)$, consistent with the backward-induction recurrence $C_k = f(C_{k+1})$. Layer~1's chain$\to$observation quadrant (bottom-left) shows diffuse attention across visible observations, consistent with PMF estimation from i.i.d.\ samples.
+We extract per-head attention weights from the best model (value+action) via a teacher-forced forward pass on 5 instances at $n=20$ (one per family: geometric, Zipf, binomial, log-normal, bimodal). Teacher forcing means every chain position receives the ground-truth $C_k/M$ as input, not the model's own prediction.
+
+\paragraph{Observations.}
+Layer~0 chain$\to$chain attention (Figure~\ref{fig:attn-full}, left) shows a nearest-neighbor diagonal---each $V(t,k)$ attends to $V(t,k{+}1)$---consistent with retrieving the previous chain value. Layer~1 chain$\to$observation attention (right) is diffuse across visible $x_0,\ldots,x_t$, consistent with PMF inference from samples. Head specialization (Figure~\ref{fig:attn-head}) confirms this split: Layer~0 heads attend almost entirely to chain tokens, Layer~1 heads increasingly read observations at later steps. Within sub-chains (Figure~\ref{fig:attn-sub}), Head~0 shows nearest-neighbor attention while Head~1 attends more broadly; observation profiles grow more uniform as the sample size increases.
 
 \begin{figure}[h]
 \centering
 \includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L0_H0_inst0.png}
 \hfill
 \includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L1_H0_inst0.png}
-\caption{Full attention maps (geometric family, $n=20$). Layer~0 (left): chain$\to$chain diagonal (DP recurrence). Layer~1 (right): chain$\to$obs diffuse (distribution inference).}
+\caption{Full attention maps (geometric family, $n=20$). Layer~0 (left): chain$\to$chain diagonal. Layer~1 (right): chain$\to$obs diffuse.}
 \label{fig:attn-full}
 \end{figure}
-
-The head specialization plot (Figure~\ref{fig:attn-head}) confirms layer-level specialization: Layer~0 heads attend almost entirely to chain tokens (green), while Layer~1 Head~0 increasingly reads observations (blue) at later decision steps where the posterior is more informative. This matches the Proposition~1 construction where Layer~1 (FFN) computes ReLU terms from the previous chain value and Layer~2 (attention) computes the PMF-weighted sum.
 
 \begin{figure}[h]
 \centering
@@ -265,8 +356,6 @@ The head specialization plot (Figure~\ref{fig:attn-head}) confirms layer-level s
 \label{fig:attn-head}
 \end{figure}
 
-The sub-chain internal attention (Figure~\ref{fig:attn-sub}) zooms into one sub-chain's within-chain pattern: Head~0 shows strong nearest-neighbor attention (each step reads the previous), while Head~1 attends more broadly. The observation profiles show that at later decision steps (more observations), attention distributes more uniformly---as expected for estimating a PMF from a growing sample.
-
 \begin{figure}[h]
 \centering
 \includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/subchain_t5_L0_inst0.png}
@@ -275,3 +364,105 @@ The sub-chain internal attention (Figure~\ref{fig:attn-sub}) zooms into one sub-
 \caption{Sub-chain $t{=}5$ internal attention in Layer~0 (left). Decision step observation profiles in Layer~1 (right). Geometric family, $n=20$.}
 \label{fig:attn-sub}
 \end{figure}
+
+\paragraph{Caveats.}
+These patterns are \emph{consistent with} the Proposition~\ref{prop:cot-stopping} construction but constitute suggestive rather than conclusive evidence. Key limitations: (i)~maps are extracted under teacher forcing with perfect inputs---autoregressive patterns may differ; (ii)~the causal mask enforces sub-chain isolation and observation access by construction, so only the \emph{distribution} of weight within allowed positions is learned; (iii)~attention weights alone do not determine the computation---the FFN and residual stream can transform attended values arbitrarily; (iv)~all plots are from 5 instances at $n=20$.
+
+\section{Theoretical Construction}
+
+\begin{proposition}[Chain-of-thought realizes the prophet DP]
+\label{prop:cot-stopping}
+Let $F = (f_1, \ldots, f_M)$ be a known PMF over $\{1,\ldots,M\}$ with $f_j > 0$ for all $j$ in the support.
+Consider a decoder-only transformer with chain-of-thought that, at decision time $t$, appends $n - t$ chain tokens after observing $x_1, \ldots, x_t$.
+Then there exist transformer weights such that the chain autoregressively generates $\hat C_n, \hat C_{n-1}, \ldots, \hat C_t$ satisfying $\hat C_k = C_k(F)$ \emph{exactly} for all $k = t, \ldots, n$, using 2 layers per chain step (independent of $n$), hidden dimension $d \ge M + 2$, and feed-forward width $d_{\mathrm{ff}} \ge M$.
+\end{proposition}
+
+\begin{proof}
+We construct explicit weight matrices. Layer normalisation is omitted, which is standard in theoretical transformer constructions; the model's learnable $\gamma, \beta$ parameters can absorb the required rescaling.
+
+\paragraph{Key identity.}
+The Bellman backup $C_k = \mathbb{E}_F[\max(X, C_{k+1})]$ can be rewritten by decomposing $\max(j, c) = c + (j - c)^+$:
+\begin{equation}
+\label{eq:bellman-relu}
+C_k(F) = C_{k+1} + \sum_{j=1}^{M} f_j \,\operatorname{ReLU}(j - C_{k+1}).
+\end{equation}
+The right-hand side is $C_{k+1}$ plus a weighted sum of ReLU activations---precisely what a residual FFN block computes. Concretely, if the FFN has $M$ hidden units with ReLU activation, the input matrix $W_1$ can extract $-C_{k+1}$, the bias $\mathbf{b}_1$ can supply the offsets $j = 1,\ldots,M$, and the output matrix $W_2$ can weight the results by $f_j$. The residual connection then adds the FFN output back to $C_{k+1}$, yielding $C_k$ exactly. We now make this precise.
+
+\paragraph{Coordinate conventions.}
+The hidden state $\mathbf{h} \in \mathbb{R}^d$ with $d = M + 2$ uses coordinate $M{+}1$ as the \emph{value slot} (storing the chain value $C_{k+1}$) and coordinate $M{+}2$ as a \emph{constant slot} (always~$1$). Coordinates $1,\ldots,M$ are reserved for the PMF assumption but are not read by this construction.
+
+\paragraph{Input embedding.}
+Each chain token receives the previous step's output $\hat C_{k+1}$ as a scalar, embedded into the value slot:
+\[
+\mathbf{h}_k^{(0)} = \hat C_{k+1}\,\mathbf{e}_{M+1} + \mathbf{e}_{M+2} \;\in\;\mathbb{R}^d.
+\]
+For the base case $k = n$: $\hat C_n = 0$, so $\mathbf{h}_n^{(0)} = \mathbf{e}_{M+2}$.
+
+\paragraph{Layer 1 --- Bellman backup via residual FFN.}
+
+\emph{Attention.} Set $W_O = \mathbf{0}$ (no-op); the hidden state passes through unchanged.
+
+\emph{FFN.} The feed-forward block $\operatorname{FFN}(\mathbf{h}) = W_2\,\operatorname{ReLU}(W_1\,\mathbf{h} + \mathbf{b}_1) + \mathbf{b}_2$ has $M$ hidden units, one per support point $j \in \{1,\ldots,M\}$. We set:
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Definition} & \textbf{Role} \\
+\midrule
+$W_1 \in \mathbb{R}^{M \times d}$ & $[W_1]_{j,i} = -\mathbf{1}[i = M{+}1]$ & Extract $-C_{k+1}$ from value slot \\
+$\mathbf{b}_1 \in \mathbb{R}^{M}$ & $[\mathbf{b}_1]_j = j$ & Add support-point offset $j$ \\
+$W_2 \in \mathbb{R}^{d \times M}$ & $[W_2]_{i,j} = f_j \cdot \mathbf{1}[i = M{+}1]$ & Weight by PMF, write to value slot \\
+$\mathbf{b}_2$ & $\mathbf{0}$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\emph{Step-by-step trace} for chain token $k$ with input $\hat C_{k+1}$ in the value slot:
+
+\begin{enumerate}
+\item \textbf{Pre-activation} ($W_1 \mathbf{h} + \mathbf{b}_1$). Each of the $M$ hidden units reads only the value slot and adds its own offset:
+\[
+[W_1\,\mathbf{h}_k + \mathbf{b}_1]_j = -\hat C_{k+1} + j = j - \hat C_{k+1}, \qquad j = 1,\ldots,M.
+\]
+\item \textbf{ReLU activation}. Unit $j$ outputs $z_j := (j - \hat C_{k+1})^{+}$. Units with $j \le \hat C_{k+1}$ are zeroed out; those with $j > \hat C_{k+1}$ output the excess $j - \hat C_{k+1}$.
+
+\item \textbf{Output projection} ($W_2 \mathbf{z}$). The output matrix $W_2$ has the PMF probabilities $f_1,\ldots,f_M$ in row $M{+}1$ (the value slot), all other rows zero. Thus:
+\[
+[\operatorname{FFN}(\mathbf{h}_k)]_{M+1} = \sum_{j=1}^{M} f_j\,z_j = \sum_{j=1}^{M} f_j\,(j - \hat C_{k+1})^{+}.
+\]
+
+\item \textbf{Residual connection}. The FFN output is added to the input hidden state:
+\[
+h_k[M{+}1] \;\leftarrow\; \underbrace{\hat C_{k+1}}_{\text{input}} + \underbrace{\sum_{j=1}^{M} f_j\,(j - \hat C_{k+1})^{+}}_{\text{FFN output}}
+  = \sum_{j=1}^{M} f_j\,\max(j,\;\hat C_{k+1})
+  = \mathbb{E}_{X \sim F}\!\big[\max(X,\,\hat C_{k+1})\big].
+\]
+The last equality uses $\max(j, c) = c + (j-c)^+$ and $\sum_j f_j = 1$.
+\end{enumerate}
+
+\paragraph{Layer 2.}
+All weight matrices set to $\mathbf{0}$ (identity via residual). Not required for the DP computation.
+
+\paragraph{Output head.}
+$\mathbf{w}_{\mathrm{out}} = \mathbf{e}_{M+1}$ extracts the value slot: $\hat C_k = h_k[M{+}1]$.
+
+\paragraph{Correctness.}
+By induction on $k = n, n{-}1, \ldots, t$:
+
+\emph{Base.} $\hat C_n = 0 = C_n(F)$.
+
+\emph{Step.} If $\hat C_{k+1} = C_{k+1}(F)$, then the trace above gives
+\[
+\hat C_k = C_{k+1} + \textstyle\sum_{j=1}^{M} f_j\,(j - C_{k+1})^{+} = C_k(F)
+\]
+by identity~\eqref{eq:bellman-relu}. Since each chain step reuses the same weight-tied 2-layer block, and the output of step $k{+}1$ feeds as input to step $k$, the induction applies across the entire chain. The computation is exact---no approximation at any step. \qedhere
+\end{proof}
+
+\begin{remark}[Instance-specific weights and the role of attention]
+\label{rem:instance-specific}
+The construction sets all attention output projections to zero---neither attention head in either layer participates in the computation. The entire Bellman backup is carried out by Layer~1's FFN and residual connection. The PMF $f_j$ is encoded directly in the output matrix $W_2$, so the weights are \emph{instance-specific}: different PMFs require different $W_2$. This is consistent with the existential claim (``there exist weights'').
+
+In the trained model, one set of weights must handle all PMFs, so $f_j$ cannot be hardcoded. Attention serves two roles not needed by the construction: (i)~Layer~0 chain$\to$chain attention retrieves $C_{k+1}$ from the previous chain token (the nearest-neighbor diagonal in Figure~\ref{fig:attn-full}), which the construction obtains for free via the input embedding; (ii)~Layer~1 attention over observations approximates the PMF-weighted aggregation $\sum_j f_j z_j$ from i.i.d.\ samples, replacing the hardcoded $W_2$.
+\end{remark}
