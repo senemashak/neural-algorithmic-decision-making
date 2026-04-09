@@ -1,93 +1,18 @@
-\section{Training Pipeline}
-\label{sec:pipeline}
-
-\subsection{Training data}
-
-Each training instance is a self-contained decision problem with a known ground-truth solution. Generation proceeds in three steps:
-
-\paragraph{Step 1: Sample a distribution.}
-A family is drawn uniformly from 10 training families, then its hyperparameters are drawn from a family-specific prior. For 6 of the 10 stopping families, the PMF is \emph{support-subsampled}: a random subset of $K \in [n, M/3]$ atoms is retained, the rest zeroed out, and the PMF renormalized. This produces sparse distributions that prevent the model from exploiting smooth parametric shapes. The same sampling and subsampling procedure is used identically for training and test instances.
-
-\begin{center}
-\small
-\begin{tabular}{ll}
-\toprule
-\textbf{Optimal stopping families} & \textbf{Ski rental families} \\
-\midrule
-Geometric ($p \sim \mathrm{U}(0.01, 0.5)$, subsampled) & Geometric ($p \sim \mathrm{U}(0.05, 0.5)$) \\
-Zipf ($\alpha \sim \mathrm{U}(1, 3)$, subsampled) & Poisson ($\lambda \sim \mathrm{U}(1, n/2)$) \\
-Binomial ($p \sim \mathrm{U}(0.1, 0.9)$, subsampled) & Binomial ($p \sim \mathrm{U}(0.1, 0.9)$) \\
-Log-normal ($\mu, \sigma$ random, subsampled) & Uniform ($K \sim \mathrm{U}\{2, n\}$) \\
-Bimodal (low/high clusters, subsampled) & Zipf ($\alpha \sim \mathrm{U}(1, 3)$) \\
-Weibull ($\beta \sim \mathrm{U}(0.3, 0.8)$, subsampled) & Log-normal ($\mu, \sigma$ random) \\
-Uniform-small ($K$ random) & Weibull ($\beta \sim \mathrm{U}(0.3, 2)$) \\
-Poisson-small ($\lambda$ random) & Bimodal (two Poisson mixture) \\
-Geometric-steep ($p \sim \mathrm{U}(0.5, 0.95)$) & Spike (deterministic + noise) \\
-Sparse-low (few atoms) & Two-point ($a, b, p_b$ random) \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-For stopping, the final $F$ is a sparse PMF over $\{1, \ldots, M\}$ (value domain). For ski rental, $F$ is a PMF over $\{1, \ldots, n\}$ (lifetime). An 11th stopping family (\texttt{hard\_instance}) is reserved for out-of-distribution testing. The stopping families group naturally by tail behavior:
-
-\begin{center}
-\small
-\begin{tabular}{ll}
-\toprule
-\textbf{Group} & \textbf{Families} \\
-\midrule
-Light-tail & Geometric, Binomial, Poisson-small, Geometric-steep \\
-Heavy-tail & Zipf, Log-normal, Weibull \\
-Structured & Bimodal, Uniform-small, Sparse-low \\
-OOD (test only) & Hard-instance \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\paragraph{Step 2: Sample horizon and costs.}
-The horizon $n \sim \mathrm{U}[20, 50]$ is drawn per instance. For ski rental, the buy cost $B \sim \mathrm{U}\{10, \ldots, 100\}$ is also per-instance, with rent cost $r = 1$ fixed.
-
-\paragraph{Step 3: Draw observations.}
-For stopping, $n$ i.i.d.\ values $x_1, \ldots, x_n \sim F$ are drawn from the sampled PMF. For ski rental, the input is a constant sequence of ones---the agent's only information at each step is that skiing has not yet ended.
-
-All sequences are zero-padded to length $n_{\max}$ with a boolean mask marking real positions. The model receives $n$ via a learned horizon embedding.
-
-\subsection{Labeling via exact dynamic programming}
-
-Each instance is labeled by running backward induction on the \emph{known} PMF $F$ (after subsampling, if applicable). The DP labels are exact with respect to the distribution the observations were actually drawn from. The transformer never sees $F$ directly---it must infer it from the observed values.
-
-\paragraph{Optimal stopping.}
-\begin{align}
-C_n &= 0, & C_t &= \mathbb{E}_{X \sim F}\!\big[\max(X, C_{t+1})\big], \quad t = n{-}1, \ldots, 1. \label{eq:stop-dp}
-\end{align}
-$C_t$ is the \emph{continuation value}: the expected payoff from rejecting the current offer and continuing optimally. The optimal policy stops at step $t$ if $x_t \ge C_t$. Labels: continuation values $C_1, \ldots, C_n$ and actions $a_t = \mathbf{1}[x_t \ge C_t]$. The model predicts $C_t/M \in [0,1]$.
-
-\paragraph{Ski rental.}
-Let $q_t = \Pr(T > t \mid T \ge t)$ be the conditional probability that skiing continues past day $t$. Then:
-\begin{align}
-J_n &= \min\{B, r\}, & J_t &= \min\{B, \; r + q_t \cdot J_{t+1}\}, \quad t = n{-}1, \ldots, 1. \label{eq:ski-dp}
-\end{align}
-$J_t$ is the \emph{cost-to-go}: the minimum expected cost from day $t$ onward. The optimal policy buys when $B \le J_t$ (buying is cheaper than continuing to rent). Labels: $J_1, \ldots, J_n$ and $a_t = \mathbf{1}[B \le J_t]$. The model predicts $J_t/B \in [0,1]$.
+\section{Model and Training}
+\label{sec:model}
 
 \subsection{Model architecture}
 
-\paragraph{Intuition.}
-The DP recurrences~\eqref{eq:stop-dp}--\eqref{eq:ski-dp} run \emph{backward} from step $n$ to step $1$. A standard transformer processes tokens left-to-right, so it cannot directly execute backward induction in a single pass. Our solution: append a chain-of-thought scratchpad that explicitly carries out the backward computation, one DP step per chain token. The transformer reads observations to infer the distribution, then uses the chain to compute continuation values step by step.
+The optimal stopping DP runs backward ($C_t$ depends on $C_{t+1}$), but the agent processes observations forward. A transformer with $L$ layers compresses at most $L$ backward steps per pass. Our solution: a \emph{chain-of-thought scratchpad} that explicitly unrolls the DP, one step per token. A 2-layer transformer can then execute arbitrarily long backward inductions.
 
-\paragraph{2D chain-of-thought.}
-At decision step $t$, the agent has observed $x_0, \ldots, x_t$ and must estimate $C_t$ (or $J_t$). A sub-chain of $n{-}1{-}t$ tokens computes the backward induction from the horizon down to step $t$:
-\[
-V(t, n{-}2) \to V(t, n{-}3) \to \cdots \to V(t, t).
-\]
-$V(t, k)$ is the model's estimate of the DP value at step $k$, using only observations $x_0, \ldots, x_t$. The final token $V(t) := V(t, t)$ is the decision output. We call this ``2D'' because there are two indices: the decision step $t$ (which posterior is used) and the DP step $k$ (which value is being computed).
-
-The full input to the transformer is:
+At each decision step $t$, a sub-chain computes $V(t, n{-}2) \to \cdots \to V(t, t)$, producing decision output $V(t) := V(t,t) \approx C_t/M$. Each sub-chain conditions on observations $x_0, \ldots, x_t$ only. Total chain length: $n(n{-}1)/2$.
 
 \begin{figure}[h]
 \centering
 \fbox{\begin{minipage}{0.9\textwidth}
-\textbf{Sequence layout} (example: $n = 5$, chain length $= 5 \cdot 4/2 = 10$, total $= 15$ tokens):
+\textbf{Sequence layout} ($n = 5$, 15 tokens):
 \begin{center}
+\small
 \begin{tabular}{|c|c|c|c|c||c|c|c|c||c|c|c||c|c||c|}
 \hline
 $x_0$ & $x_1$ & $x_2$ & $x_3$ & $x_4$ & $V_{0,3}$ & $V_{0,2}$ & $V_{0,1}$ & $V_{0,0}$ & $V_{1,3}$ & $V_{1,2}$ & $V_{1,1}$ & $V_{2,3}$ & $V_{2,2}$ & $V_{3,3}$ \\
@@ -96,36 +21,27 @@ $x_0$ & $x_1$ & $x_2$ & $x_3$ & $x_4$ & $V_{0,3}$ & $V_{0,2}$ & $V_{0,1}$ & $V_{
 \hline
 \end{tabular}
 \end{center}
-$V_{t,k}$ denotes the chain token predicting the DP value at step $k$ using the posterior from $x_0, \ldots, x_t$. Decision outputs (boxed): $V_{0,0}$, $V_{1,1}$, $V_{2,2}$, $V_{3,3}$.
+Decision outputs (diagonal): $V_{0,0}, V_{1,1}, V_{2,2}, V_{3,3}$. Stop at first $t$ where $x_t \ge V(t) \cdot M$.
 \end{minipage}}
-\caption{Sequence layout for the 2D chain-of-thought. Each sub-chain $\text{sub}(t)$ computes backward induction from step $n{-}2$ down to step $t$, conditioned on observations $x_0, \ldots, x_t$.}
-\label{fig:sequence-layout}
+\caption{2D chain-of-thought sequence layout.}
+\label{fig:layout}
 \end{figure}
 
-\paragraph{Embeddings.}
-Each token receives a sum of learned embeddings:
-\begin{itemize}
-    \item \textbf{Observation token $t$:} $\texttt{value\_embed}(x_t) + \texttt{pos\_embed}(t) + \texttt{horizon\_embed}(n) + \texttt{task\_embed}(\text{id})$ \\ (plus $\texttt{B\_embed}(B) + \texttt{r\_embed}(r)$ for ski rental).
-    \item \textbf{Chain token $(t, j)$:} $\texttt{chain\_value\_proj}(\text{prev}) + \texttt{chain2d\_t\_embed}(t) + \texttt{chain2d\_j\_embed}(j) + \text{context}$, \\ where $\text{prev}$ is the ground-truth value (teacher forcing) or the model's previous output (inference), and $j$ is the within-sub-chain step index.
-\end{itemize}
+\textbf{Architecture:} 2 layers (minimum for Bellman backup: FFN computes ReLU terms, attention computes PMF-weighted sum), 2 heads, $d_{\mathrm{model}} = 1002 \ge M{+}2$, $d_{\mathrm{ff}} = 2259$, ${\sim}20$M parameters. Single output head maps chain tokens to scalars.
 
-\paragraph{Output.}
-A single linear head $\texttt{chain\_head}: \mathbb{R}^d \to \mathbb{R}$ maps each chain token's hidden state to a scalar prediction. There are no separate value or action heads. The decision is deterministic:
-\begin{itemize}
-    \item \textbf{Stopping:} stop at first $t$ where $x_t \ge V(t) \cdot M$.
-    \item \textbf{Ski rental:} buy at first $t$ where $V(t) \ge 1$.
-\end{itemize}
+\textbf{Training:} teacher forcing (ground-truth DP values as chain inputs). \textbf{Inference:} autoregressive (model feeds its own predictions).
 
 \subsection{Attention masking}
 
-The mask enforces the online constraint: at step $t$, the agent knows $x_0, \ldots, x_t$ but not the future. It also enforces sub-chain independence: each sub-chain conditions on a different posterior, so they must not share information.
+\begin{enumerate}
+    \item Sub-chain $t$ sees $x_0, \ldots, x_t$ only (includes $x_t$; future blocked).
+    \item Sub-chains isolated from each other.
+    \item Causal within each sub-chain. Observations cannot read the scratchpad.
+\end{enumerate}
 
 \begin{figure}[h]
 \centering
-\fbox{\begin{minipage}{0.9\textwidth}
-\textbf{Attention mask} (example: $n = 4$, total sequence length $= 4 + 6 = 10$):
-
-\medskip
+\fbox{\begin{minipage}{0.85\textwidth}
 \begin{center}
 \small
 \setlength{\tabcolsep}{3pt}
@@ -147,127 +63,91 @@ $V_{1,1}$ & \checkmark & \checkmark & & & & & & \checkmark & \checkmark & \\
 $V_{2,2}$ & \checkmark & \checkmark & \checkmark & & & & & & & \checkmark \\
 \end{tabular}
 \end{center}
-
-\medskip
-\textbf{Rules:}
-\begin{enumerate}
-    \item Obs $\to$ obs: standard causal (row $i$ sees columns $0, \ldots, i$).
-    \item Sub-chain $t$ $\to$ obs: sees $x_0, \ldots, x_t$ (includes $x_t$; blocks $x_{t+1}$ onward).
-    \item Within sub-chain: causal (step $j$ sees steps $0, \ldots, j$).
-    \item Cross sub-chain: blocked (sub-chains are independent).
-    \item Obs $\to$ chain: blocked (observations cannot read the scratchpad).
-\end{enumerate}
 \end{minipage}}
-\caption{Attention mask for $n=4$. Sub-chain 0 sees only $x_0$; sub-chain 1 sees $x_0, x_1$; sub-chain 2 sees $x_0, x_1, x_2$. Each sub-chain is causally connected internally but isolated from other sub-chains.}
-\label{fig:attention-mask}
+\caption{Attention mask ($n=4$).}
+\label{fig:mask}
 \end{figure}
 
-\paragraph{Why include $x_t$?}
-At decision step $t$, the agent has already observed $x_t$ and must decide whether to stop/buy. In the Bayesian setting, the posterior over the unknown distribution $F$ includes $x_t$, so the continuation value $C_t^{\mathrm{Bayes}}(x_0, \ldots, x_t) = \mathbb{E}_{F \mid x_0, \ldots, x_t}[C_t(F)]$ depends on $x_t$. Blocking $x_t$ would force the model to estimate the continuation value using a stale posterior.
+\subsection{Training data and labeling}
+
+Each instance: random family (10 training families), random hyperparameters, support-subsampled PMF (6 of 10 families), horizon $n \sim \mathrm{U}[20, 50]$, then $n$ i.i.d.\ draws $x_1, \ldots, x_n \sim F$ over $\{1, \ldots, M\}$. Same procedure for train and test. An 11th family (\texttt{hard\_instance}) is OOD-only.
+
+Labels via exact backward induction on the known $F$ (transformer never sees $F$):
+\begin{align}
+C_n = 0, \qquad C_t = \mathbb{E}_{X \sim F}\!\big[\max(X, C_{t+1})\big], \quad t = n{-}1, \ldots, 1. \label{eq:dp}
+\end{align}
+Stop at $t$ if $x_t \ge C_t$. Model predicts $C_t/M \in [0,1]$.
 
 \subsection{Training loss}
-\label{sec:loss}
 
-The loss is a weighted combination of three terms, each providing a different supervision signal:
 \[
-L = w_v \cdot L_{\mathrm{value}} + w_a \cdot L_{\mathrm{action}} + w_c \cdot L_{\mathrm{chain}}.
+L = w_v \, L_{\mathrm{value}} + w_a \, L_{\mathrm{action}} + w_c \, L_{\mathrm{chain}}
 \]
 
-\begin{figure}[h]
-\centering
-\fbox{\begin{minipage}{0.9\textwidth}
-\textbf{Chain-of-thought supervision} (example: $n = 5$). Circles are chain tokens; filled circles are decision outputs $V(t) = V(t,t)$.
-
-\medskip
-\begin{center}
-\begin{tabular}{ccccc}
-$k=3$ & $\circ$ & $\circ$ & $\circ$ & \\
-$k=2$ & $\circ$ & $\circ$ & $\bullet$ \scriptsize{$V(2)$} & \\
-$k=1$ & $\circ$ & $\bullet$ \scriptsize{$V(1)$} & & \\
-$k=0$ & $\bullet$ \scriptsize{$V(0)$} & & & \\
-\hline
- & $t=0$ & $t=1$ & $t=2$ & $t=3$
-\end{tabular}
-\end{center}
-
-\medskip
-$L_{\mathrm{value}}$: MSE on filled circles only ($\bullet$). \\
-$L_{\mathrm{chain}}$: MSE on all circles ($\circ$ and $\bullet$)---dense supervision of every DP step. \\
-$L_{\mathrm{action}}$: soft CE on the implied stop/buy decision at each $\bullet$.
-\end{minipage}}
-\caption{The three loss terms supervise different subsets of the chain. $L_{\mathrm{chain}}$ provides the densest signal, supervising every intermediate backward-induction step.}
-\label{fig:loss-terms}
-\end{figure}
-
-\paragraph{$L_{\mathrm{value}}$: decision-output MSE.}
+\paragraph{$L_{\mathrm{value}}$.} MSE on decision outputs $V^{(b)}(t) := V^{(b)}(t,t)$:
 \[
-L_{\mathrm{value}} = \frac{1}{|\mathcal{M}|}\sum_{(b,t) \in \mathcal{M}} \big(V(t) - V^*_t\big)^2,
+L_{\mathrm{value}} = \frac{\displaystyle\sum_{b=1}^{B}\sum_{t=0}^{n_b-2} m_t^{(b)}\!\left(V^{(b)}(t) - \frac{C_t^{(b)}}{M}\right)^{\!2}}{\displaystyle\sum_{b=1}^{B}\sum_{t=0}^{n_b-2} m_t^{(b)}}
 \]
-where $V^*_t = C_t/M$ (stopping) or $J_t/B$ (ski) and $\mathcal{M}$ is the set of valid decision positions.
 
-\paragraph{$L_{\mathrm{action}}$: soft cross-entropy.}
-For stopping: $\hat{a}_t = \sigma\!\big(\alpha (x_t/M - V(t))\big) \approx 1$ when $x_t \ge V(t) \cdot M$ (stop). For ski: $\hat{a}_t = \sigma\!\big(\alpha (V(t) - 1)\big)$. Binary CE between $\hat{a}_t$ and $a^*_t$, with $\alpha = 10$.
-
-\paragraph{$L_{\mathrm{chain}}$: intermediate-step MSE.}
+\paragraph{$L_{\mathrm{action}}$.} Binary CE on implied stop decision:
 \[
-L_{\mathrm{chain}} = \frac{1}{|\mathcal{V}|}\sum_{(b,t,k) \in \mathcal{V}} \big(V(t,k) - V^*_k\big)^2.
+L_{\mathrm{action}} = -\frac{\displaystyle\sum_{b,t} m_t^{(b)}\!\Big[a_t^{(b)}\log\hat{a}_t^{(b)} + (1{-}a_t^{(b)})\log(1{-}\hat{a}_t^{(b)})\Big]}{\displaystyle\sum_{b,t} m_t^{(b)}}
 \]
-Target $V^*_k$ is the DP value at step $k$, independent of decision step $t$ (the true DP values depend on $F$, not on which sub-chain computes them). $\mathcal{V}$ includes all valid chain positions. This provides $O(n^2)$ supervision signals per instance vs.\ $O(n)$ for $L_{\mathrm{value}}$ alone.
+where $a_t^{(b)} = \mathbf{1}[x_t^{(b)} \ge C_t^{(b)}]$ and $\hat{a}_t^{(b)} = \sigma\!\big(\alpha(x_t^{(b)}/M - V^{(b)}(t))\big)$, $\alpha = 10$.
 
-\paragraph{Masking.}
-All losses are masked by the padding mask. When robust-aware training is used, $L_{\mathrm{value}}$ and $L_{\mathrm{action}}$ are additionally restricted to positions the deployment rule uses. $L_{\mathrm{chain}}$ is \emph{not} robustness-masked: the full backward-induction chain for a useful decision step must be supervised end-to-end, even at intermediate DP steps outside the deployment rule's active range.
+\paragraph{$L_{\mathrm{chain}}$.} MSE on all intermediate chain values:
+\[
+L_{\mathrm{chain}} = \frac{\displaystyle\sum_{b=1}^{B}\sum_{t=0}^{n_b-2}\sum_{k=t}^{n_b-2} v_{t,k}^{(b)}\!\left(V^{(b)}(t,k) - \frac{C_k^{(b)}}{M}\right)^{\!2}}{\displaystyle\sum_{b,t,k} v_{t,k}^{(b)}}
+\]
+This provides $O(n^2)$ supervision signals per instance vs $O(n)$ for $L_{\mathrm{value}}$.
+
+\paragraph{Masks.} Without robust training: $m_t^{(b)} = \mathbf{1}[t < n_b]$, $\;v_{t,k}^{(b)} = \mathbf{1}[t < n_b]\cdot\mathbf{1}[k < n_b]$.
+
+With robust training at $\beta$ (roots $\lambda_1, \lambda_2$ of $-\lambda\ln\lambda = \beta$):
+\[
+m_t^{(b)} = \mathbf{1}\!\left[\lambda_1 < \frac{t{+}1}{n_b} \le \lambda_2\right], \qquad v_{t,k}^{(b)} = \mathbf{1}[k < n_b] \cdot m_t^{(b)}
+\]
+$L_{\mathrm{chain}}$ filters by decision step $t$, not DP step $k$: useful sub-chains supervised end-to-end; non-useful sub-chains zeroed entirely.
+
+\subsection{Evaluation metric}
+
+Competitive ratio: $\mathrm{CR} = \mathbb{E}[X_\tau] / \mathbb{E}[\max_s X_s]$. The DP oracle (knows $F$) achieves ${\approx}0.94$; the gap from 1 is the cost of being online. All policies evaluated on the same instances. Mean $\pm$ std over 5 eval seeds, 1{,}000 instances each.
+
+\subsection{Robust deployment rule}
+
+\begin{algorithm}[h]
+\caption{Robust stopping rule}
+\label{alg:robust}
+\begin{algorithmic}[1]
+\Require $n$, $\beta$, learned $V(\cdot)$
+\State $\lambda_1, \lambda_2 \gets$ roots of $-\lambda \ln \lambda = \beta$
+\For{$t = 1, \dots, n$}
+    \State Observe $x_t$; track $m_t = \max(x_1, \ldots, x_t)$; $\mathrm{isBest} = (x_t > m_{t-1})$
+    \If{$t/n \le \lambda_1$} \textbf{continue} \Comment{Early: skip}
+    \ElsIf{$t/n \le \lambda_2$}
+        \If{isBest \textbf{and} $x_t \ge V(t) \cdot M$} \textbf{stop} \Comment{Middle: use $V(t)$}
+        \EndIf
+    \Else
+        \If{isBest} \textbf{stop} \Comment{Late: take any best}
+        \EndIf
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Guarantee: $\mathrm{CR} \ge \beta$ regardless of $V(t)$ quality. The transformer improves over the guarantee in the middle phase.
 
 \section{Experiments}
 \label{sec:experiments}
 
-We conduct four experiments for optimal stopping:
-
 \begin{enumerate}
-\item \textbf{Loss weight sweep} (\texttt{exp1\_loss\_weights}): Which combination of $L_{\mathrm{value}}$, $L_{\mathrm{action}}$, $L_{\mathrm{chain}}$ works best? 11 weight configurations, 3 seeds each.
-\item \textbf{Robust-aware training} (\texttt{exp2\_robust}): Does masking training to only the positions the robust wrapper uses improve performance? 7 robustness levels, standard vs masked.
-\item \textbf{Attention analysis} (\texttt{exp3\_attention}): What do the attention heads learn? Mechanistic interpretation of the best models from Experiments~1--2.
-\item \textbf{Horizon generalization} (\texttt{exp4\_horizon}): Does the model generalize to horizons outside the training range $[20, 50]$? Evaluation at $n \in \{5, 10, 15, 20, 30, 40, 50, 75, 100\}$.
+\item \textbf{Loss weight sweep} (\texttt{exp1}): 11 configs for $(w_v, w_a, w_c)$.
+\item \textbf{Robust-aware training} (\texttt{exp2}): masked vs standard at 7 $\beta$ values.
+\item \textbf{Attention analysis} (\texttt{exp3}): mechanistic interpretation.
+\item \textbf{Horizon generalization} (\texttt{exp4}): $n \in \{5, \ldots, 100\}$ (trained on $[20, 50]$).
 \end{enumerate}
 
-\subsection{Experimental setting}
-
-The architecture satisfies both Propositions~\ref{prop:cot-stopping}--\ref{prop:cot-ski}: $d_{\mathrm{model}} = 1002 \ge M + 2$ (exact stopping DP) and $d_{\mathrm{ff}} = 2259 \ge (B_{\max}{+}1)\sqrt{n_{\max}}/(2\sqrt{\varepsilon})$ (ski DP to $\varepsilon = 0.1$). We use 2 layers (the theoretical minimum: the stopping Bellman backup requires FFN then attention sequentially) and 2 attention heads, yielding ${\sim}20$M parameters.
-
-Training horizons $n \sim \mathrm{U}[20, 50]$ (capped at 50 because the $O(n^2)$ chain creates 1{,}275-token sequences at $n{=}50$; GPU memory is the bottleneck). Buy costs $B \sim \mathrm{U}\{10, 100\}$, $r = 1$. Training on 5{,}000 instances from a uniform mixture of 10 families per problem. The 11th stopping family (\texttt{hard\_instance}) is OOD-only. Testing uses a fixed horizon $n = 20$ (the lower end of the training range) with freshly sampled distributions from the same family mixture.
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Hyperparameter} & \textbf{Value} & \textbf{Justification} \\
-\midrule
-$d_{\mathrm{model}}$ & 1002 & $\ge M{+}2 = 1002$ (Prop.~\ref{prop:cot-stopping}) \\
-$d_{\mathrm{ff}}$ & 2259 & $\ge 101\sqrt{50}/(2\sqrt{0.1}) \approx 2259$ (Prop.~\ref{prop:cot-ski}) \\
-Layers & 2 & Min.\ for stopping: FFN (ReLU terms) then attention (PMF-weighted sum) \\
-Heads & 2 & Interpretable: chain-recurrence head + observation-reading head \\
-$n$ (train) & $\mathrm{U}[20, 50]$ & $n{=}50 \Rightarrow$ seq.\ len.\ $1{,}275$; $n{=}200$ would need $20{,}100$ (OOM) \\
-Epochs & $\le 30$ & Early stopping, patience 10 \\
-Params & ${\sim}20$M & \\
-\bottomrule
-\end{tabular}
-\caption{Architecture and training configuration.}
-\label{tab:hparams}
-\end{table}
-
-Each configuration: 3 training seeds $\times$ 5 eval seeds $\times$ 1{,}000 test instances per eval seed. Testing on all 11 stopping families (incl.\ OOD) and 10 ski families. Model selection by deployment metric (CR for stopping, additive loss for ski). Best checkpoint and attention maps saved per config.
-
-\paragraph{Metrics.}
-\emph{Competitive ratio} (both problems): $\mathrm{CR} = \mathbb{E}[X_\tau] / \mathbb{E}[\max X_s]$ (stopping) or $\mathbb{E}[c(\mathrm{OPT})] / \mathbb{E}[c(\mathrm{ALG})]$ (ski, ratio of means). \emph{$P(\text{best})$} (stopping): fraction selecting the max. \emph{Additive loss} (ski): $\Delta = \mathbb{E}[c(\mathrm{ALG})] - \mathbb{E}[c(\mathrm{OPT})]$.
-
-\subsection{Experiment 1: Loss weighting ablation}
-\label{sec:exp1}
-
-\paragraph{Motivation.}
-The three loss terms provide qualitatively different signals: $L_{\mathrm{value}}$ directly optimizes the quantity used for decisions, $L_{\mathrm{action}}$ aligns decisions with DP-optimal choices, and $L_{\mathrm{chain}}$ supervises the reasoning process itself. It is unclear a priori whether dense chain supervision helps (by guiding the backward-induction computation) or hurts (by over-constraining the model's internal representations). Similarly, the action loss could be redundant with the value loss (since the action is derived from $V(t)$) or complementary (by shaping the loss landscape near the decision boundary).
-
-\paragraph{Design.}
-We sweep 11 weight configurations spanning single-term ablations, pairwise combinations, balanced weightings, and emphasis variants:
+\subsection{Experiment 1: Loss weighting}
 
 \begin{center}
 \small
@@ -275,66 +155,114 @@ We sweep 11 weight configurations spanning single-term ablations, pairwise combi
 \toprule
 Config & $w_v$ & $w_a$ & $w_c$ & Config & $w_v$ & $w_a$ & $w_c$ \\
 \midrule
-\texttt{value\_only} & 1 & 0 & 0 & \texttt{equal\_third} & .33 & .33 & .33 \\
-\texttt{action\_only} & 0 & 1 & 0 & \texttt{emph\_value} & .5 & .25 & .25 \\
-\texttt{chain\_only} & 0 & 0 & 1 & \texttt{emph\_action} & .25 & .5 & .25 \\
-\texttt{value+action} & 1 & .5 & 0 & \texttt{emph\_chain} & .25 & .25 & .5 \\
-\texttt{value+chain} & .5 & 0 & .5 & \texttt{all\_1\_0.5\_1} & 1 & .5 & 1 \\
-\texttt{action+chain} & 0 & .5 & .5 & & & & \\
+value only & 1 & 0 & 0 & equal third & .33 & .33 & .33 \\
+action only & 0 & 1 & 0 & emph value & .5 & .25 & .25 \\
+chain only & 0 & 0 & 1 & emph action & .25 & .5 & .25 \\
+value+action & 1 & .5 & 0 & emph chain & .25 & .25 & .5 \\
+value+chain & .5 & 0 & .5 & all 1 0.5 1 & 1 & .5 & 1 \\
+action+chain & 0 & .5 & .5 & & & & \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\paragraph{Key questions.}
-\begin{enumerate}
-    \item Does chain supervision ($w_c > 0$) improve over unsupervised scratchpad ($w_c = 0$)?
-    \item Is $L_{\mathrm{action}}$ complementary to $L_{\mathrm{value}}$ or redundant?
-    \item Do the answers differ between stopping (in-context posterior inference required) and ski (only aggregate statistics needed)?
-\end{enumerate}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{plots/exp1_loss_weights/ranking_stopping.png}
+\caption{Exp~1: Configs ranked by CR. DP oracle dashed.}
+\end{figure}
 
-\paragraph{Outputs.}
-Per config: training curves (total + breakdown, $\pm$std across seeds), in-distribution CR and secondary metrics, per-family heatmaps across all test families, comparison with DP oracle and baselines, best-model checkpoint, and attention maps.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{plots/exp1_loss_weights/per_family_cr_stopping.png}
+\caption{Exp~1: Per-family CR across 11 distribution families (red=low, green=high).}
+\end{figure}
 
-\paragraph{Compute.}
-66 models total ($11 \times 3 \times 2$). At ${\sim}60$s/epoch on an RTX A6000, the sweep completes in ${\sim}12$ hours on two GPUs in parallel (stopping on one, ski on the other).
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{plots/exp1_loss_weights/chain_effect_stopping.png}
+\caption{Exp~1: Chain supervision effect. Left: $w_c > 0$. Right: $w_c = 0$.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp1_loss_weights/training_curves/training_stopping_value+action.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp1_loss_weights/training_curves/training_stopping_value_only.png}
+\caption{Exp~1: Training curves for value+action (left) vs value only (right). Adding $L_{\mathrm{action}}$ stabilizes training and improves convergence.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp1_loss_weights/training_curves/training_stopping_action_only.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp1_loss_weights/training_curves/training_stopping_equal_third.png}
+\caption{Exp~1: Action only (left) fails to learn meaningful values. Equal third (right) converges but underperforms value+action.}
+\end{figure}
 
 \subsection{Experiment 2: Robust-aware training}
-\label{sec:exp2}
 
-\paragraph{Motivation.}
-The robust deployment rule (Algorithm~1) ignores the model's predictions at early and late positions. Training on those positions wastes gradient signal. Does restricting supervision to only the positions the wrapper uses improve the model's accuracy where it matters?
+For $\beta \in \{0.05, \ldots, 0.35\}$: masked model (1/3, 1/3, 1/3) vs standard model, both deployed with wrapper.
 
-\paragraph{Design.}
-For each $\beta \in \{0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35\}$, we train a masked model with equal weights $(1/3, 1/3, 1/3)$ where $L_{\mathrm{value}}$, $L_{\mathrm{action}}$, and $L_{\mathrm{chain}}$ are zeroed at positions outside the middle phase $(\lambda_1, \lambda_2]$. For $L_{\mathrm{chain}}$, the mask filters by decision step $t$: entire sub-chains for non-useful $t$ receive no gradient, but useful sub-chains are supervised end-to-end. We compare against the standard \texttt{equal\_third} model (trained on all positions) deployed with the same wrapper at each $\beta$.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{plots/exp2_robust/robust_cr_vs_beta.png}
+\caption{Exp~2: CR vs $\beta$. Standard (blue) and masked (purple) with wrapper, no wrapper (green), DP oracle (red with $\pm$std band).}
+\end{figure}
 
-\paragraph{Key questions.}
-\begin{enumerate}
-    \item Does masked training improve CR under the robust wrapper?
-    \item Does the answer depend on $\beta$ (how much of the horizon is masked)?
-    \item How does the wrapper itself affect CR compared to no wrapper ($\beta = 0$)?
-\end{enumerate}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{plots/exp2_robust/robust_cr_diff.png}
+\caption{Exp~2: CR difference (masked $-$ standard) per $\beta$. Green=masked better, red=standard better.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{plots/exp2_robust/robust_per_family_all_betas.png}
+\caption{Exp~2: Per-family CR for DP oracle, standard, and masked at all $\beta$.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp2_robust/robust_training_curves/training_beta0.05.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp2_robust/robust_training_curves/training_beta0.35.png}
+\caption{Exp~2: Training curves for $\beta=0.05$ (left, minimal masking) and $\beta=0.35$ (right, heavy masking).}
+\end{figure}
 
 \subsection{Experiment 3: Attention analysis}
-\label{sec:exp3}
 
-\paragraph{Motivation.}
-The 2-layer, 2-head architecture was chosen to match the Proposition~1 construction. Do the learned attention patterns reflect the theoretical roles: one head for chain recurrence (reading $V(t,k{+}1)$), one for observation reading (inferring the PMF)?
+Attention from the best model (value+action) on 5 diverse instances (geometric, Zipf, binomial, log-normal, bimodal).
 
-\paragraph{Design.}
-For the best models from Experiments~1--2, we extract attention weights via teacher-forced forward passes on 5 diverse instances (one per family: geometric, Zipf, binomial, log-normal, bimodal). Visualizations include: full attention maps with quadrant labels, per-decision-step observation profiles, within-sub-chain recurrence patterns, head specialization (obs vs chain attention fraction), and prediction accuracy ($V(t)$ vs DP targets).
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L0_H0_inst0.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/full_L1_H0_inst0.png}
+\caption{Exp~3: Full attention maps, geometric instance. Layer~0 (left): chain$\to$chain diagonal. Layer~1 (right): chain$\to$obs diffuse.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/head_specialization_inst0.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/predictions_inst0.png}
+\caption{Exp~3: Head specialization showing obs vs chain attention fraction (left). Prediction accuracy: $V(t)$ vs DP target $C_t/M$ (right).}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/subchain_t5_L0_inst0.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{plots/exp3_attention/attention_value+action/decision_obs_L1_inst0.png}
+\caption{Exp~3: Sub-chain $t{=}5$ internal attention in Layer~0 (left). Decision step observation profiles in Layer~1 (right).}
+\end{figure}
 
 \subsection{Experiment 4: Horizon generalization}
-\label{sec:exp4}
 
-\paragraph{Motivation.}
-The model trains on $n \sim \mathrm{U}[20, 50]$. Can it generalize to shorter ($n = 5, 10, 15$) or longer ($n = 75, 100$) horizons? The chain-of-thought provides $n{-}1$ reasoning steps regardless of horizon, so in principle the same 2-layer computation applies at any $n$.
+Evaluate at $n \in \{5, 10, 15, 20, 30, 40, 50, 55, 65, 75, 85, 100\}$ (trained on $[20, 50]$). No retraining.
 
-\paragraph{Design.}
-We evaluate the best models from Experiments~1--2 at $n \in \{5, 10, 15, 20, 30, 40, 50, 75, 100\}$. No retraining. For each horizon: DP oracle (upper bound), \texttt{value+action} (no wrapper), \texttt{equal\_third} with wrapper at each $\beta$, and masked models with wrapper at their training $\beta$. Instance count scales inversely with $n^2$ to manage GPU memory (the $O(n^2)$ chain creates up to 5{,}050 tokens at $n{=}100$).
-
-\paragraph{Key questions.}
-\begin{enumerate}
-    \item Does CR degrade at extrapolation horizons?
-    \item Does the robust wrapper help more outside the training range?
-    \item Does masked training help or hurt at novel horizons?
-\end{enumerate}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{plots/exp4_horizon/horizon_cr_all_betas.png}
+\caption{Exp~4: CR vs test horizon for equal third model at all robustness levels. DP oracle (red), no wrapper (blue), wrapper at each $\beta$ (colored lines). Training range shaded.}
+\end{figure}
