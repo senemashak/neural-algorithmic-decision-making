@@ -28,7 +28,21 @@ Sparse-low (few atoms) & Two-point ($a, b, p_b$ random) \\
 \end{tabular}
 \end{center}
 
-For stopping, the final $F$ is a sparse PMF over $\{1, \ldots, M\}$ (value domain). For ski rental, $F$ is a PMF over $\{1, \ldots, n\}$ (lifetime). An 11th stopping family (\texttt{hard\_instance}) is reserved for out-of-distribution testing.
+For stopping, the final $F$ is a sparse PMF over $\{1, \ldots, M\}$ (value domain). For ski rental, $F$ is a PMF over $\{1, \ldots, n\}$ (lifetime). An 11th stopping family (\texttt{hard\_instance}) is reserved for out-of-distribution testing. The stopping families group naturally by tail behavior:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Group} & \textbf{Families} \\
+\midrule
+Light-tail & Geometric, Binomial, Poisson-small, Geometric-steep \\
+Heavy-tail & Zipf, Log-normal, Weibull \\
+Structured & Bimodal, Uniform-small, Sparse-low \\
+OOD (test only) & Hard-instance \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \paragraph{Step 2: Sample horizon and costs.}
 The horizon $n \sim \mathrm{U}[20, 50]$ is drawn per instance. For ski rental, the buy cost $B \sim \mathrm{U}\{10, \ldots, 100\}$ is also per-instance, with rent cost $r = 1$ fixed.
