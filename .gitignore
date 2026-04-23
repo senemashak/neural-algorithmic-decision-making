@@ -19,3 +19,6 @@ __pycache__/
 
 # Logs
 *.log
+
+# Derived Belady simulation cache (regeneratable from traces)
+caching/data/belady_cache/

@@ -1,49 +1,35 @@
 # Neural Algorithmic Decision Making
 
-A causal transformer with 2D chain-of-thought that learns to solve online decision problems by performing backward induction in a scratchpad. Trained on exact dynamic programming labels, evaluated on optimal stopping and ski rental.
+Transformers that learn classical online algorithms from exact oracle labels.
 
-## Key idea
+## Subprojects
 
-Online decision problems require computing continuation values via backward induction — a process that runs *backward* but must be applied *online*. We append a chain-of-thought scratchpad where the model explicitly carries out the DP computation, one step per token. A 2-layer, 2-head transformer (~20M params) with architecture dimensions satisfying the theoretical construction requirements (Propositions 1-2).
+### [`stopping/`](stopping/)
 
-## Experiments
+Causal transformer with a **2D chain-of-thought scratchpad** for online
+decision problems — **optimal stopping** and **ski rental**. The model performs
+backward induction in-place, one continuation value per scratchpad token, under
+an attention mask that enforces the online posterior at every DP step. 2-layer,
+2-head, ~20M params; trained on exact DP labels. Details in
+[`stopping/README.md`](stopping/README.md) and [`stopping/experiment.tex`](stopping/experiment.tex).
 
-1. **Loss weight sweep** — which combination of value, action, and chain losses works best
-2. **Robust-aware training** — does masking training to positions the robust wrapper uses help
-3. **Attention analysis** — mechanistic interpretation of learned attention patterns
-4. **Horizon generalization** — does the model generalize to unseen sequence lengths
+### [`caching/`](caching/)
 
-## Structure
+Transformer that learns the **Belady (furthest-in-future) eviction policy**
+for caching. Each attention block has two heads — one keyed on the full cache
+(k=32 slots, always visible), the other keyed on a sliding window of the
+request sequence (so the model scales to T=16,000-long traces while only
+attending over `k + w` tokens). Trained on eviction decisions extracted from
+an oracle pass over the full trace. Generator for LRU/LFU/ARC-favoring
+workloads lives alongside the model in
+[`caching/`](caching/) under
+[`caching/learned_eviction/`](caching/learned_eviction/).
 
-```
-code/
-  core/                — model, training, evaluation infrastructure
-  experiments/         — experiment scripts (train, eval, plot)
-results/               — checkpoints, results.json, attention maps
-logs/                  — training and eval logs
-plots/
-  exp1_loss_weights/   — loss weight sweep results
-  exp2_robust/         — robust training results
-  exp3_attention/      — attention visualizations
-  exp4_horizon/        — horizon generalization
-experiment.tex         — detailed experiment writeup
-```
+## Shared idea
 
-## Running
+Both subprojects imitate an **oracle that sees information the model cannot**:
+- Stopping/ski: the oracle solves the DP with knowledge of the full distribution.
+- Caching: the oracle (Belady) sees the full future request sequence.
 
-```bash
-cd code/
-
-# Experiment 1: loss weight sweep
-python -m experiments.sweep_weights --device cuda --only stopping
-
-# Experiment 2: robust training + evaluation
-python -m experiments.train_robust_stopping --device cuda
-python -m experiments.eval_robust_stopping --device cuda
-
-# Experiment 3: attention visualization
-python -m core.attention both --checkpoint model.pt --device cuda
-
-# Experiment 4: horizon generalization
-python -m experiments.eval_horizon --device cuda
-```
+In both cases the learned model has access only to the online posterior and must
+recover the oracle's decisions from partial information. 

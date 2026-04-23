@@ -1,0 +1,83 @@
+{
+  "config": {
+    "k": 32,
+    "U": 512,
+    "T": 16000,
+    "margin": 0.04,
+    "margin_per_family": {
+      "LRU": 0.04,
+      "LFU": 0.04,
+      "ARC": 0.04
+    },
+    "warmup_frac": 0.1,
+    "n_per_family": 1000,
+    "lru_w_range": [
+      1.0,
+      1.15
+    ],
+    "lru_phase_len_range": [
+      120,
+      280
+    ],
+    "lru_noise_range": [
+      0.02,
+      0.06
+    ],
+    "lru_overlap": 0.0,
+    "lfu_alpha_range": [
+      0.95,
+      1.15
+    ],
+    "lfu_universe_factor": 16.0,
+    "lfu_block_shuffle": 256,
+    "arc_core_frac_range": [
+      0.2,
+      0.4
+    ],
+    "arc_phase_frac_range": [
+      0.5,
+      0.8
+    ],
+    "arc_phase_len_range": [
+      600,
+      1000
+    ],
+    "arc_p_core": 0.25,
+    "arc_p_phase": 0.55,
+    "arc_scan_every_phases": 2,
+    "arc_scan_len_range": [
+      128,
+      256
+    ],
+    "seed": 0
+  },
+  "families": {
+    "LRU": {
+      "margin": 0.04,
+      "accepted": 1000,
+      "attempts": 1304,
+      "accept_rate": 0.7668711656441718,
+      "elapsed_sec": 19.01471471786499,
+      "mean_hit_rate": 0.7283016666666666,
+      "mean_runner_up_gap": 0.04346006944444445
+    },
+    "LFU": {
+      "margin": 0.04,
+      "accepted": 1000,
+      "attempts": 56620,
+      "accept_rate": 0.017661603673613566,
+      "elapsed_sec": 676.5964889526367,
+      "mean_hit_rate": 0.592418263888889,
+      "mean_runner_up_gap": 0.04263840277777778
+    },
+    "ARC": {
+      "margin": 0.04,
+      "accepted": 1000,
+      "attempts": 1000,
+      "accept_rate": 1.0,
+      "elapsed_sec": 12.698761940002441,
+      "mean_hit_rate": 0.6288090972222221,
+      "mean_runner_up_gap": 0.11000444444444445
+    }
+  }
+}
