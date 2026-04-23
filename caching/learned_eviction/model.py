@@ -115,7 +115,7 @@ class CacheEvictionTransformer(nn.Module):
         self,
         vocab_size: int = 513,
         cache_size: int = 32,
-        context_window: int = 512,
+        context_window: int = 1024,
         d_model: int = 128,
         d_ff: int = 256,
         n_layers: int = 2,

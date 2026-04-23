@@ -37,12 +37,20 @@ def build_loaders(data_dir: Path, k: int, w: int, batch_size: int, num_workers: 
     )
     print(f"train {len(train_ds):,} | val {len(val_ds):,} | test {len(test_ds):,}")
 
+    split_info = {
+        "files": [p.name for p in trace_files],
+        "train": train_ds.row_indices_per_file,
+        "val": val_ds.row_indices_per_file,
+        "test": test_ds.row_indices_per_file,
+    }
+
     common = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-    return (
+    loaders = (
         DataLoader(train_ds, shuffle=True, drop_last=True, **common),
         DataLoader(val_ds, shuffle=False, **common),
         DataLoader(test_ds, shuffle=False, **common),
     )
+    return loaders, split_info
 
 
 @torch.no_grad()
@@ -65,10 +73,16 @@ def train(args):
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
 
-    train_loader, val_loader, _test_loader = build_loaders(
+    (train_loader, val_loader, _test_loader), split_info = build_loaders(
         data_dir, k=args.k, w=args.context_window,
         batch_size=args.batch_size, num_workers=args.num_workers,
     )
+
+    log_path = Path(args.log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    with open(log_path / "split.json", "w") as f:
+        json.dump({"data_dir": str(data_dir), **split_info}, f)
+    print(f"split saved to {log_path / 'split.json'}")
 
     model = CacheEvictionTransformer(
         vocab_size=args.vocab_size,
@@ -84,9 +98,6 @@ def train(args):
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     loss_fn = nn.CrossEntropyLoss()
-
-    log_path = Path(args.log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
 
     best_val = float("inf")
     step = 0
@@ -129,7 +140,7 @@ def parse_args():
     p.add_argument("--log-dir", type=str, default="learned_eviction/runs/default")
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--k", type=int, default=32)
-    p.add_argument("--context-window", type=int, default=512)
+    p.add_argument("--context-window", type=int, default=1024)
     p.add_argument("--vocab-size", type=int, default=513)
     p.add_argument("--d-model", type=int, default=128)
     p.add_argument("--d-ff", type=int, default=256)

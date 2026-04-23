@@ -183,3 +183,51 @@ def default_split(
         )
 
     return _make(per_file_train), _make(per_file_val), _make(per_file_test)
+
+
+def load_split_datasets(
+    split_json_path: str | Path,
+    cache_size: int = 32,
+    context_window: int = 1024,
+    cache_root: str | Path | None = None,
+    data_dir_override: str | Path | None = None,
+):
+    """Reconstruct train/val/test EvictionDatasets from a saved split.json.
+
+    split.json schema (written by train.py):
+        {
+          "data_dir": "<path to the dir holding *_traces.npy>",
+          "files":    ["ARC_traces.npy", "LFU_traces.npy", "LRU_traces.npy"],
+          "train":    [[row_ids_for_file_0], [...], [...]],
+          "val":      [[...], [...], [...]],
+          "test":     [[...], [...], [...]],
+        }
+
+    Args:
+        split_json_path:   path to the split.json saved at train time.
+        cache_size, context_window: must match the model being evaluated.
+        cache_root:        where Belady simulation results are cached. Defaults
+                           to <data_dir>/../belady_cache.
+        data_dir_override: override the recorded data_dir (useful if traces
+                           were moved since training).
+    """
+    import json
+
+    with open(split_json_path) as f:
+        split = json.load(f)
+
+    data_dir = Path(data_dir_override) if data_dir_override else Path(split["data_dir"])
+    trace_files = [data_dir / name for name in split["files"]]
+    if cache_root is None:
+        cache_root = data_dir.parent / "belady_cache"
+
+    def _make(indices):
+        return EvictionDataset(
+            trace_files,
+            cache_size=cache_size,
+            context_window=context_window,
+            cache_root=cache_root,
+            trace_indices=indices,
+        )
+
+    return _make(split["train"]), _make(split["val"]), _make(split["test"])
