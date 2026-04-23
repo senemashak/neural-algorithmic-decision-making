@@ -26,16 +26,22 @@ from torch.utils.data import Dataset
 from .belady import simulate_belady_batch
 
 
+# Bump this whenever the on-disk cache schema changes (new fields, new
+# simulator behaviour). Forces invalidation of stale .npz files.
+_CACHE_VERSION = "v2"
+
+
 def _cache_path(trace_path: Path, k: int, cache_root: Path) -> Path:
     stat = trace_path.stat()
-    key = f"{trace_path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|k={k}"
+    key = f"{_CACHE_VERSION}|{trace_path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|k={k}"
     digest = hashlib.sha1(key.encode()).hexdigest()[:16]
     return cache_root / f"{trace_path.stem}.k{k}.{digest}.npz"
 
 
 def _labels_for_trace_file(trace_path: Path, k: int, cache_root: Path) -> dict:
-    """Return dict with cache_states, miss_full_mask, eviction_labels.
-    Runs Belady on every trace in the file, caching the result on disk."""
+    """Return dict with cache_states, miss_full_mask, eviction_labels,
+    full_cache_labels. Runs Belady on every trace in the file, caching the
+    result on disk."""
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_file = _cache_path(trace_path, k, cache_root)
     if cache_file.exists():
@@ -44,16 +50,23 @@ def _labels_for_trace_file(trace_path: Path, k: int, cache_root: Path) -> dict:
             "cache_states": z["cache_states"],
             "miss_full_mask": z["miss_full_mask"],
             "eviction_labels": z["eviction_labels"],
+            "full_cache_labels": z["full_cache_labels"],
         }
     traces = np.load(trace_path)
-    cs, mm, el = simulate_belady_batch(traces, k=k)
+    cs, mm, el, fcl = simulate_belady_batch(traces, k=k)
     np.savez(
         cache_file,
         cache_states=cs.astype(np.int32),
         miss_full_mask=mm,
         eviction_labels=el.astype(np.int16),
+        full_cache_labels=fcl.astype(np.int16),
     )
-    return {"cache_states": cs, "miss_full_mask": mm, "eviction_labels": el}
+    return {
+        "cache_states": cs,
+        "miss_full_mask": mm,
+        "eviction_labels": el,
+        "full_cache_labels": fcl,
+    }
 
 
 class EvictionDataset(Dataset):
@@ -145,6 +158,100 @@ class EvictionDataset(Dataset):
         }
 
 
+class HypotheticalEvictionDataset(Dataset):
+    """Every timestep where Belady's cache is full is a training example.
+
+    Labels come from ``full_cache_labels[t]`` — the slot Belady *would* evict
+    if forced to evict at step t, regardless of whether step t is actually a
+    miss or a hit. This balances per-family contribution (each trace yields
+    ~T examples, independent of eviction rate) and gives the model additional
+    signal on hit steps ("which cached item is least useful to keep?").
+
+    Same input schema as ``EvictionDataset``: (cache, seq, label).
+
+    Args:
+        max_per_trace:   optional cap on per-trace examples. If set, each trace
+                         contributes at most this many full-cache timesteps,
+                         uniformly random without replacement, deterministic
+                         per (file_idx, row) seed.
+        subsample_seed:  base seed for per-(file_idx, row) subsampling.
+    """
+
+    def __init__(
+        self,
+        trace_files,
+        cache_size: int = 32,
+        context_window: int = 1024,
+        cache_root: str | Path = "learned_eviction/belady_cache",
+        trace_indices: list[list[int]] | None = None,
+        max_per_trace: int | None = None,
+        subsample_seed: int = 0,
+    ):
+        self.k = cache_size
+        self.w = context_window
+        self.cache_root = Path(cache_root)
+        self.trace_files = [Path(p) for p in trace_files]
+        self.max_per_trace = max_per_trace
+        self.subsample_seed = subsample_seed
+
+        self.traces_per_file: list[np.ndarray] = []
+        self.cache_states_per_file: list[np.ndarray] = []
+        self.full_cache_labels_per_file: list[np.ndarray] = []
+        self.row_indices_per_file: list[list[int]] = []
+
+        self.index: list[tuple[int, int, int]] = []
+
+        for fi, p in enumerate(self.trace_files):
+            traces = np.load(p)
+            lab = _labels_for_trace_file(p, self.k, self.cache_root)
+            cs = lab["cache_states"]
+            fcl = lab["full_cache_labels"]
+
+            rows = list(trace_indices[fi]) if trace_indices is not None else list(range(traces.shape[0]))
+
+            self.traces_per_file.append(traces)
+            self.cache_states_per_file.append(cs)
+            self.full_cache_labels_per_file.append(fcl)
+            self.row_indices_per_file.append(rows)
+
+            for r in rows:
+                full_ts = np.nonzero(fcl[r] >= 0)[0]
+                if max_per_trace is not None and len(full_ts) > max_per_trace:
+                    # Deterministic per-(fi, r) subsample, sorted for locality.
+                    seed = subsample_seed + fi * 1_000_003 + r
+                    rng = np.random.default_rng(seed)
+                    full_ts = np.sort(rng.choice(full_ts, size=max_per_trace, replace=False))
+                for t in full_ts:
+                    self.index.append((fi, int(r), int(t)))
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, i: int):
+        fi, r, t = self.index[i]
+        traces = self.traces_per_file[fi]
+        cs = self.cache_states_per_file[fi]
+        fcl = self.full_cache_labels_per_file[fi]
+
+        w = self.w
+        start = t - (w - 1)
+        if start >= 0:
+            window = traces[r, start : t + 1].astype(np.int64) + 1
+        else:
+            pad = np.zeros(-start, dtype=np.int64)
+            window = np.concatenate([pad, traces[r, : t + 1].astype(np.int64) + 1])
+        assert window.shape[0] == w
+
+        cache = cs[r, t].astype(np.int64)
+        label = int(fcl[r, t])
+
+        return {
+            "cache": torch.from_numpy(cache),
+            "seq": torch.from_numpy(window),
+            "label": torch.tensor(label, dtype=torch.long),
+        }
+
+
 def default_split(
     trace_files,
     cache_size: int = 32,
@@ -153,11 +260,25 @@ def default_split(
     test_frac: float = 0.1,
     seed: int = 0,
     cache_root: str | Path = "learned_eviction/belady_cache",
+    label_mode: str = "event",
+    max_per_trace: int | None = None,
 ):
     """Split trace rows (not timesteps) into train/val/test per file.
 
     Splitting by trace, not by timestep, prevents train/test leakage across the
     same trace's history.
+
+    Args:
+        label_mode: ``"event"`` → use :class:`EvictionDataset` (one example per
+                    full-cache miss, Belady's true eviction choice).
+                    ``"all_timesteps"`` → use
+                    :class:`HypotheticalEvictionDataset` (one example per
+                    full-cache timestep, labelled with Belady's hypothetical
+                    choice).
+        max_per_trace: only meaningful with ``label_mode="all_timesteps"``; caps
+                    the number of full-cache timesteps kept per trace.
+                    Sub-sampling is deterministic per (file, row). Applied to
+                    all three returned datasets uniformly.
     """
     rng = np.random.default_rng(seed)
     per_file_train, per_file_val, per_file_test = [], [], []
@@ -173,14 +294,19 @@ def default_split(
         per_file_val.append(val_ids)
         per_file_test.append(test_ids)
 
+    cls = {"event": EvictionDataset,
+           "all_timesteps": HypotheticalEvictionDataset}[label_mode]
+
     def _make(indices):
-        return EvictionDataset(
-            trace_files,
+        kwargs = dict(
             cache_size=cache_size,
             context_window=context_window,
             cache_root=cache_root,
             trace_indices=indices,
         )
+        if label_mode == "all_timesteps":
+            kwargs["max_per_trace"] = max_per_trace
+        return cls(trace_files, **kwargs)
 
     return _make(per_file_train), _make(per_file_val), _make(per_file_test)
 
@@ -191,6 +317,8 @@ def load_split_datasets(
     context_window: int = 1024,
     cache_root: str | Path | None = None,
     data_dir_override: str | Path | None = None,
+    label_mode: str = "event",
+    max_per_trace: int | None = None,
 ):
     """Reconstruct train/val/test EvictionDatasets from a saved split.json.
 
@@ -221,13 +349,18 @@ def load_split_datasets(
     if cache_root is None:
         cache_root = data_dir.parent / "belady_cache"
 
+    cls = {"event": EvictionDataset,
+           "all_timesteps": HypotheticalEvictionDataset}[label_mode]
+
     def _make(indices):
-        return EvictionDataset(
-            trace_files,
+        kwargs = dict(
             cache_size=cache_size,
             context_window=context_window,
             cache_root=cache_root,
             trace_indices=indices,
         )
+        if label_mode == "all_timesteps":
+            kwargs["max_per_trace"] = max_per_trace
+        return cls(trace_files, **kwargs)
 
     return _make(split["train"]), _make(split["val"]), _make(split["test"])

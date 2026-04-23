@@ -1,0 +1,260 @@
+\documentclass{article}
+
+\PassOptionsToPackage{numbers}{natbib}
+\usepackage[final]{formatting/neurips_2024}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{titlesec}
+\usepackage{graphicx}
+\usepackage{mathtools} % provides \coloneqq
+\usepackage{multirow}
+
+\setlist{nosep,leftmargin=*}
+\setlist[enumerate]{label=(\arabic*)}
+\setlength{\abovedisplayskip}{4pt}
+\setlength{\belowdisplayskip}{4pt}
+\setlength{\abovedisplayshortskip}{2pt}
+\setlength{\belowdisplayshortskip}{2pt}
+\setlength{\textfloatsep}{8pt}
+\setlength{\floatsep}{6pt}
+\setlength{\intextsep}{6pt}
+\titlespacing*{\section}{0pt}{1.2ex}{0.6ex}
+\titlespacing*{\subsection}{0pt}{1ex}{0.4ex}
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+\newtheorem{proposition}{Proposition}
+
+\usepackage{color-edits}
+\addauthor[Ellen]{ev}{red}
+\addauthor[SI]{si}{teal}
+
+\title{Caching}
+
+\begin{document}
+\maketitle
+
+\section{Experiments}
+
+\subsection{Setup}
+
+Dataset: 3000 synthetic traces (1000 per family LRU/LFU/ARC), each of length
+$T{=}16{,}000$ over a universe of $U{=}512$ items, cache capacity $k{=}32$.
+Each family is filtered so its target algorithm beats the other two by at
+least $0.04$ absolute hit-rate gap. Split is per-trace-row 80/10/10
+(train/val/test), seed=0, preventing leakage across timesteps of the same
+trace.
+
+Model: causal transformer with a dual-attention block (one head keyed on the
+full cache, one head keyed on a sliding window of the recent request
+sequence), $d_{\text{model}}{=}128$, $d_{\text{ff}}{=}256$, 2 layers, 2 heads,
+context window $w{=}1024$, $465{,}665$ parameters. Trained for 6 epochs under
+teacher forcing: at every Belady full-cache-miss event the model sees
+Belady's own cache state and predicts the slot to evict, supervised by
+Belady's choice with cross-entropy loss. Optimisation: AdamW, lr $10^{-3}$,
+effective batch 1024 (4$\times$ A6000 GPUs via DDP, 256 per rank).
+
+\subsection{Training curves}
+
+Training and validation loss/accuracy per epoch are plotted in
+\texttt{learned\_eviction/runs/default/training\_curves.png}. Train loss
+descends rapidly from chance ($\log 32 \approx 3.47$) around step 800, plateaus
+near 1.8 through most of epoch 0, breaks below 1.5 mid-epoch 2, and then
+bounces in the $1.5\text{--}1.8$ band through epochs 3--5. Per-epoch
+validation loss decreases monotonically (epochs 0--4) from $1.7825$ to
+$1.7447$ with an uptick at epoch 5 ($1.7497$). Validation accuracy inches up
+every epoch (51.9\% $\to$ 52.5\%). Best checkpoint (lowest val loss) is
+epoch 4.
+
+\subsection{Teacher-forced test evaluation}
+
+The model is evaluated on the held-out test set (1.28M eviction events
+across 300 traces, 100 per family) with Belady's cache state as input
+(identical to training conditions). Item-level agreement with LRU/LFU/ARC is
+measured at \emph{shared} eviction timesteps: for each Belady eviction event
+at time $t$, if algorithm $X$ also evicts at $t$ (on its own running cache),
+compare the item that the transformer evicts (from Belady's cache) to the
+item $X$ evicts. Coverage reports the fraction of Belady events where $X$
+also performs an eviction; agreement is conditional on coverage.
+
+\paragraph{Overall.} Test loss $1.7374$, slot-accuracy (agreement with
+Belady) $52.46\%$. This matches epoch-5 validation (52.48\%), indicating no
+train/test generalisation gap.
+
+\paragraph{Per-dominating-family accuracy.} Grouping test examples by the
+dominant algorithm of their source trace (determined from the recorded
+hit-rate scores in \texttt{*\_scores.json}, which by construction matches
+the source family) reveals a stark asymmetry:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Dominant family & \#examples & Slot-accuracy \\
+\midrule
+LRU-dominant & 306,417 & 13.1\% \\
+LFU-dominant & 528,821 & 61.4\% \\
+ARC-dominant & 445,781 & 68.9\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Per-dominating-family agreement with each classical algorithm.}
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+Group & Algo & Coverage & Agreement \\
+\midrule
+\multirow{3}{*}{All} & LRU & $100.0\%$ & $\phantom{0}0.3\%$ \\
+                    & LFU & $\phantom{0}92.8\%$  & $46.0\%$ \\
+                    & ARC & $\phantom{0}99.7\%$  & $\phantom{0}9.8\%$ \\
+\midrule
+\multirow{3}{*}{LRU-dom} & LRU & $100.0\%$ & $\phantom{0}1.2\%$ \\
+                         & LFU & $\phantom{0}94.1\%$  & $\phantom{0}7.3\%$ \\
+                         & ARC & $\phantom{0}99.9\%$  & $\phantom{0}1.7\%$ \\
+\midrule
+\multirow{3}{*}{LFU-dom} & LRU & $100.0\%$ & $\phantom{0}0.0\%$ \\
+                         & LFU & $\phantom{0}90.3\%$  & $64.9\%$ \\
+                         & ARC & $\phantom{0}99.4\%$  & $\phantom{0}5.5\%$ \\
+\midrule
+\multirow{3}{*}{ARC-dom} & LRU & $100.0\%$ & $\phantom{0}0.0\%$ \\
+                         & LFU & $\phantom{0}94.8\%$  & $51.0\%$ \\
+                         & ARC & $\phantom{0}99.8\%$  & $20.5\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Interpretation}
+
+\paragraph{The model has learned an LFU-flavoured policy.} LFU agreement
+dominates every row: $46\%$ overall, $65\%$ on LFU-dominant traces, and
+still $51\%$ even on ARC-dominant traces. Agreement with LRU is essentially
+zero ($0.3\%$ overall), and agreement with ARC is modest ($\sim\!10\%$).
+Whatever heuristic the transformer has internalised, it looks much more like
+``evict the least-frequently-accessed item'' than like recency tracking or
+ARC's T1/T2 logic.
+
+\paragraph{The headline 52\% accuracy hides a sharp per-family split.} The
+model is near-optimal on ARC traces ($69\%$ agreement with Belady),
+competent on LFU traces ($61\%$), and close to random on LRU traces
+($13\%$)---where the optimal policy is essentially recency-driven, exactly
+the pattern the model failed to acquire.
+
+\paragraph{Why LRU is under-learnt.} Training signal is drawn from
+full-cache miss events only (\emph{i.e.} the steps where Belady evicts).
+Eviction density differs substantially by family:
+LRU traces generate $3{,}090$ events per trace, LFU $5{,}254$, ARC $4{,}548$.
+Across the 800 training traces per family this yields roughly
+$2.47$M / $4.20$M / $3.64$M training examples for LRU/LFU/ARC respectively,
+so LRU contributes only $\approx\!24\%$ of the gradient signal. The model
+preferentially fits the heavier modes of the data distribution, which in
+this dataset are LFU- and ARC-style workloads. A class-balanced sampler or
+a per-family loss reweighting would likely narrow the accuracy gap on
+LRU-dominant traces; this is a candidate follow-up experiment.
+
+\paragraph{Caveat on comparing to ARC.} Unlike LRU and LFU whose eviction
+rule can be computed from the cache contents alone plus access history,
+ARC's decision depends on its internal T1/T2/B1/B2 partition, which is
+trajectory-dependent. Our agreement metric therefore measures item-level
+coincidence at shared eviction timesteps rather than slot-level agreement on
+a common cache. The high coverage ($\approx\!100\%$) reflects the fact that
+after warm-up, both Belady and ARC evict on every full-cache miss; the
+disagreement is genuinely about which item to evict given the two
+algorithms' divergent cache contents.
+
+\subsection{Closed-loop (rollout) hit-rate evaluation}
+
+In the teacher-forced setting the model sees Belady's cache at every event;
+an eviction mistake has no downstream effect. The rollout evaluation drops
+that assumption. The transformer starts each trace with an empty cache and
+\emph{commits} its eviction decision on every full-cache miss; the cache
+state evolves under the model's own policy, and errors cascade. Hit rate is
+computed after a $10\%$ warm-up prefix (identical to the convention used at
+dataset-generation time), giving one number per trace. Baseline hit rates for
+LRU/LFU/ARC are taken from the recorded \texttt{*\_scores.json}, which were
+computed under the same warm-up.
+
+All 300 test traces are rolled out in parallel (batch of 300 on a single
+A6000), running the model only on the subset of traces in a full-cache-miss
+state at each timestep. Total rollout wall-clock: $635.6$ seconds.
+
+\paragraph{Overall.}
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Policy & Hit rate \\
+\midrule
+ARC   & $62.63\%$ \\
+LRU   & $57.70\%$ \\
+\textbf{Model} & $\mathbf{45.61\%}$ \\
+LFU   & $31.67\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Per dominating family.} Test traces are grouped by their
+dominating algorithm (recorded per-trace at dataset generation time). Bold
+entries mark the best policy within each row.
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+Group & $n$ & Model & LRU & LFU & ARC \\
+\midrule
+LRU-dom & 100 & $30.55\%$ & $\mathbf{73.16\%}$ & $\phantom{0}8.81\%$ & $68.84\%$ \\
+LFU-dom & 100 & $55.33\%$ & $46.54\%$ & $\mathbf{58.98\%}$ & $54.71\%$ \\
+ARC-dom & 100 & $50.96\%$ & $53.40\%$ & $27.21\%$ & $\mathbf{64.33\%}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Takeaways.} The closed-loop results mirror the teacher-forced
+pattern almost exactly.
+
+On \emph{LFU-dominant} traces the model is within $3.7$ pp of the LFU
+baseline ($55.3\%$ vs.\ $59.0\%$), beating both LRU and ARC. This is the
+clearest evidence that the learned policy is operationally useful on
+workloads where frequency is the right signal.
+
+On \emph{ARC-dominant} traces the model lags ARC by $13.4$ pp ($51.0\%$ vs.\
+$64.3\%$) and is essentially tied with LRU ($53.4\%$). The model captures
+some of ARC's behaviour but cannot reproduce its frequent-core-plus-drift
+handling.
+
+On \emph{LRU-dominant} traces the model collapses: $30.6\%$ hit rate against
+LRU's $73.2\%$---a $42.6$ pp gap. In fact the model is closer in behaviour
+to LFU ($8.8\%$) than to LRU; it has essentially no ability to track recency
+in the drifting-working-set regime these traces exercise.
+
+\paragraph{Is the model useful as a general-purpose cache policy?} No, not
+as currently trained. Averaged across all three families, the model
+($45.6\%$) is $12$ pp behind LRU and $17$ pp behind ARC. Even on per-family
+bases it never beats the matching classical baseline. The teacher-forced
+accuracy of $52\%$ might have suggested a more adaptive policy; the rollout
+result clarifies that the policy is essentially LFU-shaped, and is only
+competitive on LFU-shaped workloads.
+
+\paragraph{Connection to the data-imbalance hypothesis.} The
+per-dominating-family gap structure is consistent with (though not proof of)
+the hypothesis in the previous subsection: LRU traces contribute only
+$\approx\!24\%$ of the training events and the model correspondingly
+under-learns recency tracking. Testing this directly would require at
+minimum a per-family loss reweighting run; that experiment is not yet
+performed.
+
+\end{document}
+

@@ -1,6 +1,9 @@
 """End-to-end sanity check: Belady sim → dataset item → model forward → loss step.
 
-Run from caching-experiments/ as:
+Checks both label modes: ``event`` (EvictionDataset) and ``all_timesteps``
+(HypotheticalEvictionDataset).
+
+Run from caching/:
     python3 -m learned_eviction.smoke_test
 """
 
@@ -14,40 +17,55 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from .belady import simulate_belady
-from .dataset import EvictionDataset
+from .dataset import EvictionDataset, HypotheticalEvictionDataset
 from .model import CacheEvictionTransformer
 
 
 def _belady_sanity():
     rng = np.random.default_rng(0)
     trace = rng.integers(0, 8, size=200)
-    cs, mm, el = simulate_belady(trace, k=4)
+    cs, mm, el, fcl = simulate_belady(trace, k=4)
     assert cs.shape == (200, 4)
-    assert mm.dtype == bool and el.dtype == np.int64
-    assert (el[~mm] == -1).all(), "non-miss steps should have label -1"
+    assert mm.dtype == bool and el.dtype == np.int64 and fcl.dtype == np.int64
+    # Eviction labels: defined exactly on miss-full events.
+    assert (el[~mm] == -1).all(), "non-miss steps should have event-label -1"
     assert (el[mm] >= 0).all() and (el[mm] < 4).all()
-    print(f"[belady] ok — misses-with-full-cache: {int(mm.sum())} / {len(mm)}")
+    # Hypothetical labels: defined on every timestep from first full-cache step.
+    full_idx = np.nonzero(fcl >= 0)[0]
+    assert len(full_idx) > 0, "cache should become full on a 200-step trace with k=4"
+    first_full = int(full_idx[0])
+    assert (fcl[first_full:] >= 0).all(), "cache stays full once filled"
+    assert (fcl[full_idx] < 4).all()
+    # On miss-full events the hypothetical label should match the real eviction label.
+    assert (fcl[mm] == el[mm]).all(), "on actual evictions fcl must agree with el"
+    print(f"[belady] ok — miss-full: {int(mm.sum())}  full-cache steps: {len(full_idx)}")
 
 
 def _dataset_sanity(data_dir: Path, k: int, w: int):
     files = sorted(data_dir.glob("*_traces.npy"))
     assert files, f"no *_traces.npy in {data_dir}"
-    # Use a small slice of each file so the first run is fast.
     small_indices = [[0, 1] for _ in files]
-    ds = EvictionDataset(
-        files,
-        cache_size=k,
-        context_window=w,
-        cache_root=data_dir.parent / "belady_cache",
-        trace_indices=small_indices,
+    cache_root = data_dir.parent / "belady_cache"
+
+    ds_event = EvictionDataset(
+        files, cache_size=k, context_window=w,
+        cache_root=cache_root, trace_indices=small_indices,
     )
-    print(f"[dataset] {len(ds):,} eviction steps across {len(files)} files × 2 traces")
-    sample = ds[0]
-    assert sample["cache"].shape == (k,)
-    assert sample["seq"].shape == (w,)
-    assert sample["label"].ndim == 0
-    assert 0 <= int(sample["label"]) < k
-    return ds
+    ds_all = HypotheticalEvictionDataset(
+        files, cache_size=k, context_window=w,
+        cache_root=cache_root, trace_indices=small_indices,
+    )
+    ratio = len(ds_all) / max(len(ds_event), 1)
+    print(f"[dataset event]          {len(ds_event):,} examples")
+    print(f"[dataset all_timesteps]  {len(ds_all):,} examples  ({ratio:.1f}× event)")
+
+    for ds_name, ds in [("event", ds_event), ("all_timesteps", ds_all)]:
+        sample = ds[0]
+        assert sample["cache"].shape == (k,)
+        assert sample["seq"].shape == (w,)
+        assert sample["label"].ndim == 0
+        assert 0 <= int(sample["label"]) < k
+    return ds_all
 
 
 def _model_sanity(ds, k: int, w: int, device: str):

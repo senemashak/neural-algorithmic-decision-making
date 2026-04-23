@@ -1,0 +1,112 @@
+{
+  "test_loss": 1.7374430452264216,
+  "test_accuracy_overall": 0.5245979958142697,
+  "per_family_accuracy": {
+    "LRU": {
+      "n": 306417,
+      "acc": 0.13113828540844666
+    },
+    "LFU": {
+      "n": 528821,
+      "acc": 0.6137577743697773
+    },
+    "ARC": {
+      "n": 445781,
+      "acc": 0.6892824054861019
+    }
+  },
+  "agreement": {
+    "all": {
+      "LRU": {
+        "belady_events": 1281019,
+        "shared_events": 1281019,
+        "matches": 3783,
+        "coverage": 1.0,
+        "agreement": 0.002953117791383266
+      },
+      "LFU": {
+        "belady_events": 1281019,
+        "shared_events": 1188427,
+        "matches": 546411,
+        "coverage": 0.9277200416231141,
+        "agreement": 0.4597766627651509
+      },
+      "ARC": {
+        "belady_events": 1281019,
+        "shared_events": 1277024,
+        "matches": 125439,
+        "coverage": 0.9968813889567602,
+        "agreement": 0.09822759791515273
+      }
+    },
+    "LRU": {
+      "LRU": {
+        "belady_events": 306417,
+        "shared_events": 306417,
+        "matches": 3714,
+        "coverage": 1.0,
+        "agreement": 0.012120737426448272
+      },
+      "LFU": {
+        "belady_events": 306417,
+        "shared_events": 288207,
+        "matches": 21115,
+        "coverage": 0.9405711824082867,
+        "agreement": 0.0732633142151301
+      },
+      "ARC": {
+        "belady_events": 306417,
+        "shared_events": 306205,
+        "matches": 5106,
+        "coverage": 0.999308132381689,
+        "agreement": 0.01667510328048203
+      }
+    },
+    "LFU": {
+      "LRU": {
+        "belady_events": 528821,
+        "shared_events": 528821,
+        "matches": 2,
+        "coverage": 1.0,
+        "agreement": 3.7819980673989875e-06
+      },
+      "LFU": {
+        "belady_events": 528821,
+        "shared_events": 477505,
+        "matches": 309896,
+        "coverage": 0.9029614935866768,
+        "agreement": 0.6489900629312783
+      },
+      "ARC": {
+        "belady_events": 528821,
+        "shared_events": 525861,
+        "matches": 29084,
+        "coverage": 0.9944026428602495,
+        "agreement": 0.05530739111666391
+      }
+    },
+    "ARC": {
+      "LRU": {
+        "belady_events": 445781,
+        "shared_events": 445781,
+        "matches": 67,
+        "coverage": 1.0,
+        "agreement": 0.00015029801629051035
+      },
+      "LFU": {
+        "belady_events": 445781,
+        "shared_events": 422715,
+        "matches": 215400,
+        "coverage": 0.9482571038245237,
+        "agreement": 0.5095631808665413
+      },
+      "ARC": {
+        "belady_events": 445781,
+        "shared_events": 444958,
+        "matches": 91249,
+        "coverage": 0.9981538019789986,
+        "agreement": 0.2050732878159287
+      }
+    }
+  }
+}
